@@ -238,6 +238,9 @@ class CurveEditor(Gtk.Box):
         bar.append(icon_button("list-add-symbolic", "Add a curve point", self._add, label="Point"))
         bar.append(icon_button("view-refresh-symbolic", "Reload the curve currently on the GPU",
                                lambda *_: (self._reload()), label="Reload"))
+        bar.append(icon_button("edit-undo-symbolic",
+                               "Revert the fan to the card's stock auto table (undo manual control)",
+                               self._stock, label="Stock"))
         self.hint = Gtk.Label(xalign=0, hexpand=True)
         self.hint.add_css_class("dim")
         bar.append(self.hint)
@@ -388,6 +391,10 @@ class CurveEditor(Gtk.Box):
     def _reload(self):
         self.points = self.gpu.read_curve()
         self.area.queue_draw()
+
+    def _stock(self, *_):
+        # hand the fan back to the card's stock auto table (pwm1_enable=2)
+        run_priv(["xe-fan-curve", "auto"], self.window)
 
     def _apply(self, *_):
         pts = sorted(self.points)

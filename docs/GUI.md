@@ -4,7 +4,7 @@ A native **GTK4 / libadwaita** control panel for the Arc (xe) GPU. It replaces t
 third-party tool like CoolerControl — the fan-curve editor is built in.
 
 ```bash
-sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1
 sudo install -m755 gui/xe-gpu-gui.py /usr/local/bin/xe-gpu-gui
 install -m644 gui/xe-gpu-gui.desktop ~/.local/share/applications/
 update-desktop-database ~/.local/share/applications 2>/dev/null || true

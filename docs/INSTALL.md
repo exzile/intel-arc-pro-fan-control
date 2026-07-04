@@ -55,7 +55,8 @@ sudo install -m755 scripts/xe-gpu.sh         /usr/local/bin/xe-gpu
 sudo install -m755 scripts/xe-fan-rebuild.sh /usr/local/sbin/xe-fan-rebuild
 
 # optional native desktop GUI (GTK4 + libadwaita)
-sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1   # runtime deps
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1   # runtime deps
+# (python3-gi-cairo is required for the fan-curve graph to render)
 sudo install -m755 gui/xe-gpu-gui.py /usr/local/bin/xe-gpu-gui
 install -m644 gui/xe-gpu-gui.desktop ~/.local/share/applications/   # appears as "Arc GPU Dashboard"
 update-desktop-database ~/.local/share/applications 2>/dev/null || true
