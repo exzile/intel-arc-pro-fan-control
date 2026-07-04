@@ -176,11 +176,14 @@ class Window(Adw.ApplicationWindow):
         self.tune_group = Adw.PreferencesGroup(
             title="Tuning", description="Applied via xe-gpu-tune (needs authorization)")
         cl = self.gpu.clocks()
+        lo, hi = cl.get("rpn") or 400, cl.get("rp0") or 2400
         self.power_spin = self._spin(50, 400, 10, self.gpu.power().get("cap_w") or 190)
-        self.clkmax_spin = self._spin(cl.get("rpn") or 400, cl.get("rp0") or 2400, 50,
-                                      cl.get("max") or (cl.get("rp0") or 2400))
+        self.clkmin_spin = self._spin(lo, hi, 50, cl.get("min") or lo)
+        self.clkmax_spin = self._spin(lo, hi, 50, cl.get("max") or hi)
         prow = Adw.ActionRow(title="Power cap", subtitle="watts")
         prow.add_suffix(self.power_spin)
+        mrow = Adw.ActionRow(title="Min clock", subtitle="MHz — idle floor (low = cooler idle)")
+        mrow.add_suffix(self.clkmin_spin)
         crow = Adw.ActionRow(title="Max clock", subtitle="MHz")
         crow.add_suffix(self.clkmax_spin)
         apply_btn = Gtk.Button(label="Apply", valign=Gtk.Align.CENTER)
@@ -194,7 +197,7 @@ class Window(Adw.ApplicationWindow):
         abox.append(reset_btn)
         abox.append(apply_btn)
         arow.add_suffix(abox)
-        for r in (prow, crow, arow):
+        for r in (prow, mrow, crow, arow):
             self.tune_group.add(r)
         page.add(self.tune_group)
 
@@ -215,6 +218,7 @@ class Window(Adw.ApplicationWindow):
     def on_apply_tune(self, _btn):
         args = ["xe-gpu-tune", "set",
                 "--power-w", str(int(self.power_spin.get_value())),
+                "--clk-min", str(int(self.clkmin_spin.get_value())),
                 "--clk-max", str(int(self.clkmax_spin.get_value()))]
         run_priv(args, self)
         GLib.timeout_add(900, self.refresh)
