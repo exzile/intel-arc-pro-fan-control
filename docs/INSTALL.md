@@ -53,6 +53,13 @@ sudo install -m755 scripts/xe-gpu-tune.sh    /usr/local/bin/xe-gpu-tune
 sudo install -m755 scripts/xe-gpu-temps.sh   /usr/local/bin/xe-gpu-temps
 sudo install -m755 scripts/xe-gpu.sh         /usr/local/bin/xe-gpu
 sudo install -m755 scripts/xe-fan-rebuild.sh /usr/local/sbin/xe-fan-rebuild
+
+# optional native desktop GUI (GTK4 + libadwaita)
+sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1   # runtime deps
+sudo install -m755 gui/xe-gpu-gui.py /usr/local/bin/xe-gpu-gui
+install -m644 gui/xe-gpu-gui.desktop ~/.local/share/applications/   # appears as "Arc GPU Dashboard"
+update-desktop-database ~/.local/share/applications 2>/dev/null || true
+# controls (fan/power/clock) use pkexec, so the helpers must be installed too
 sudo install -m755 kernel-hook/zz-xe-fan-rebuild /etc/kernel/postinst.d/zz-xe-fan-rebuild
 sudo mkdir -p /usr/local/share/xe-fan
 sudo cp patch/xe-fan-control-168027-cachyos-7.1.2.patch /usr/local/share/xe-fan/

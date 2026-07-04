@@ -24,6 +24,7 @@ Related upstream issue: [intel/compute-runtime #885](https://github.com/intel/co
 | Idle power/heat optimization | ❌ (idles at 1200 MHz) | ✅ (idles at 400 MHz) |
 | All-sensor temp/health monitor | raw sysfs | ✅ `xe-gpu-temps` (table/watch/json) |
 | Single-command status dashboard | — | ✅ `xe-gpu` (fan+clocks+power+temps) |
+| Native desktop GUI | — | ✅ `xe-gpu-gui` (GTK4/libadwaita, live + controls) |
 | Survives reboots | — | ✅ systemd |
 | Survives kernel updates | — | ✅ auto-rebuild hook |
 
@@ -69,6 +70,9 @@ Full step-by-step (with the module install/reload, `.zst` gotcha, and verificati
 ## Usage
 
 ```bash
+# native desktop GUI (GTK4/libadwaita): live monitor + fan/power/clock controls
+xe-gpu-gui             # or launch "Arc GPU Dashboard" from your apps menu
+
 # one-stop dashboard + front-end (wraps the tools below)
 xe-gpu                 # status: card + clocks + power + fan + temps in one view
 xe-gpu watch           # live dashboard

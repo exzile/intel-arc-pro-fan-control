@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Arc GPU Dashboard
+GenericName=GPU Monitor
+Comment=Intel Arc (xe) GPU — fan, clocks, power and temperatures
+Exec=xe-gpu-gui
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;
+Keywords=GPU;Intel;Arc;Battlemage;fan;temperature;clocks;power;
+StartupNotify=true
