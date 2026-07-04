@@ -61,8 +61,9 @@ case "${1:-show}" in
       TT+=("$t"); PP+=("$p")
     done
     n=${#TT[@]}
-    # manual mode FIRST (writes are rejected otherwise)
-    echo 1 > "$HWMON/pwm1_enable"
+    # manual mode FIRST (auto_point writes are rejected otherwise). Only switch if
+    # needed — the driver returns EINVAL on writing pwm1_enable=1 when already 1.
+    [ "$(cat "$HWMON/pwm1_enable" 2>/dev/null)" = 1 ] || echo 1 > "$HWMON/pwm1_enable"
     # fill all NPOINTS slots: use given points, then repeat the last (temp climbs +1C, pwm held)
     # to keep the whole table strictly monotonic in temp.
     prev_t=-1
