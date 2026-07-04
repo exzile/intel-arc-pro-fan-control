@@ -22,6 +22,7 @@ Related upstream issue: [intel/compute-runtime #885](https://github.com/intel/co
 | GPU power cap (TDP) | ✅ sysfs | ✅ + persistent helper |
 | GPU clock min/max limits | ✅ sysfs | ✅ + persistent helper |
 | Idle power/heat optimization | ❌ (idles at 1200 MHz) | ✅ (idles at 400 MHz) |
+| All-sensor temp/health monitor | raw sysfs | ✅ `xe-gpu-temps` (table/watch/json) |
 | Survives reboots | — | ✅ systemd |
 | Survives kernel updates | — | ✅ auto-rebuild hook |
 
@@ -51,6 +52,7 @@ sudo APPLY=1 bash scripts/apply_xefan.sh         # apply + build
 # 2. install the userland helpers + persistence
 sudo install -m755 scripts/xe-fan-curve.sh  /usr/local/bin/xe-fan-curve
 sudo install -m755 scripts/xe-gpu-tune.sh   /usr/local/bin/xe-gpu-tune
+sudo install -m755 scripts/xe-gpu-temps.sh  /usr/local/bin/xe-gpu-temps
 sudo install -m755 scripts/xe-fan-rebuild.sh /usr/local/sbin/xe-fan-rebuild
 sudo install -m755 kernel-hook/zz-xe-fan-rebuild /etc/kernel/postinst.d/zz-xe-fan-rebuild
 sudo cp systemd/etc/*.conf /etc/
@@ -75,6 +77,11 @@ sudo xe-fan-curve max         # full speed
 sudo xe-gpu-tune show
 sudo xe-gpu-tune set --power-w 150 --clk-max 2000 --clk-min 400
 sudo xe-gpu-tune reset
+
+# temperatures / health (read-only, no patch needed)
+xe-gpu-temps            # table of every sensor + limits, fan, power
+xe-gpu-temps watch 2    # live refresh every 2s
+xe-gpu-temps json       # machine-readable (for scripts / dashboards)
 ```
 
 - GUI fan curves via **CoolerControl** — see [docs/COOLERCONTROL.md](docs/COOLERCONTROL.md).

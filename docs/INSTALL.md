@@ -50,6 +50,7 @@ ls /sys/class/hwmon/hwmon*/pwm1_enable        # should exist now (find the one w
 ```bash
 sudo install -m755 scripts/xe-fan-curve.sh   /usr/local/bin/xe-fan-curve
 sudo install -m755 scripts/xe-gpu-tune.sh    /usr/local/bin/xe-gpu-tune
+sudo install -m755 scripts/xe-gpu-temps.sh   /usr/local/bin/xe-gpu-temps
 sudo install -m755 scripts/xe-fan-rebuild.sh /usr/local/sbin/xe-fan-rebuild
 sudo install -m755 kernel-hook/zz-xe-fan-rebuild /etc/kernel/postinst.d/zz-xe-fan-rebuild
 sudo mkdir -p /usr/local/share/xe-fan
