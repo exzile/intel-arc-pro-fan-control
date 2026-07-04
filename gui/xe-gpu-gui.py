@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# xe-gpu-gui — native GTK4/libadwaita dashboard for the Intel Arc (xe) GPU.
-# Compact two-pane layout: live stats + controls (left), dense temperature grid (right).
-# Controls call xe-fan-curve / xe-gpu-tune via pkexec (polkit prompts for privileged writes).
+# xe-gpu-gui — native GTK4/libadwaita control panel for the Intel Arc (xe) GPU.
+# Tabs: Dashboard (live stats + tuning) and Fan Curve (graphical draggable editor).
+# Controls call xe-fan-curve / xe-gpu-tune via pkexec (polkit prompts for writes).
 # Reads are unprivileged sysfs; no kernel poking here.
 import os, glob, subprocess
 import gi
@@ -10,24 +10,25 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Gio, Gdk  # noqa: E402
 
 REFRESH_SECONDS = 2
+TMIN, TMAX = 20, 100          # curve editor temperature axis (°C)
+MAX_POINTS = 10
 
 CSS = b"""
 .card2 { background: @card_bg_color; border-radius: 12px; padding: 12px 14px; }
-.section { font-weight: bold; opacity: 0.7; font-size: 0.80em; letter-spacing: .04em; }
+.section { font-weight: bold; opacity: 0.7; font-size: 0.80em; letter-spacing:.04em; }
 .big { font-size: 1.7em; font-weight: 800; }
-.unit { opacity: 0.55; font-size: 0.82em; }
 .dim { opacity: 0.60; font-size: 0.86em; }
 .chip { border-radius: 9px; padding: 7px 6px; background: alpha(@window_fg_color,0.05); }
 .chip .cval { font-weight: 700; }
 .chip .clbl { opacity: 0.60; font-size: 0.74em; }
-.t-cool { color: #3584e4; } .chip.t-cool { background: alpha(#3584e4,0.12); }
-.t-warm { color: #e5a50a; } .chip.t-warm { background: alpha(#e5a50a,0.16); }
-.t-hot  { color: #e01b24; } .chip.t-hot  { background: alpha(#e01b24,0.18); }
-.hotmark { font-weight: 800; }
+.t-cool { color:#3584e4; } .chip.t-cool{ background:alpha(#3584e4,0.12);}
+.t-warm { color:#e5a50a; } .chip.t-warm{ background:alpha(#e5a50a,0.16);}
+.t-hot  { color:#e01b24; } .chip.t-hot { background:alpha(#e01b24,0.18);}
+.info { opacity:0.45; }
 """
 
 
-# ---------------------------------------------------------------- data layer
+# ---------------------------------------------------------------- data
 def _read(p):
     try:
         with open(p) as f:
@@ -88,6 +89,7 @@ class XeGpu:
         pwm = _int(os.path.join(self.hwmon, "pwm1_enable"))
         return {"rpm": _int(os.path.join(self.hwmon, "fan1_input")),
                 "max": _int(os.path.join(self.hwmon, "fan1_max")),
+                "duty": _int(os.path.join(self.hwmon, "pwm1")),
                 "mode": {0: "full", 1: "manual curve", 2: "auto"}.get(pwm, "?")}
 
     def temps(self):
@@ -103,6 +105,33 @@ class XeGpu:
                         "c": inp // 1000, "crit": (crit // 1000) if crit else None})
         return out
 
+    def pkg_temp(self):
+        for t in self.temps():
+            if t["label"] == "pkg":
+                return t["c"]
+        return None
+
+    def read_curve(self):
+        pts = []
+        for i in range(1, MAX_POINTS + 1):
+            t = _int(os.path.join(self.hwmon or "_", f"pwm1_auto_point{i}_temp"))
+            p = _int(os.path.join(self.hwmon or "_", f"pwm1_auto_point{i}_pwm"))
+            if t is None:
+                break
+            pts.append([t // 1000, p if p is not None else 0])
+        # collapse a flat/degenerate stock table to a sensible default
+        temps = [t for t, _ in pts]
+        if not pts or len(set(p for _, p in pts)) <= 1 or len(set(temps)) < 3:
+            return list(PRESETS["Balanced"])
+        return pts
+
+
+PRESETS = {
+    "Silent":     [[40, 0], [55, 45], [70, 100], [82, 170], [90, 255]],
+    "Balanced":   [[40, 60], [55, 95], [65, 140], [75, 195], [85, 255]],
+    "Cool/Loud":  [[35, 90], [50, 150], [65, 205], [80, 255]],
+}
+
 
 def tclass(c, crit):
     if crit and c >= crit - 10:
@@ -114,10 +143,9 @@ def tclass(c, crit):
 
 def run_priv(args, parent, after=None):
     try:
-        p = subprocess.Popen(["pkexec"] + args)
+        subprocess.Popen(["pkexec"] + args)
         if after:
-            GLib.timeout_add(1000, lambda: (after(), False)[1])
-        return p
+            GLib.timeout_add(1200, lambda: (after(), False)[1])
     except OSError as e:
         d = Adw.MessageDialog(transient_for=parent, heading="Command failed",
                               body=f"{' '.join(args)}\n{e}")
@@ -125,155 +153,361 @@ def run_priv(args, parent, after=None):
         d.present()
 
 
-# ---------------------------------------------------------------- widgets
-def card(title):
+# ---------------------------------------------------------------- small widgets
+def card(title, info=None):
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
     box.add_css_class("card2")
-    lbl = Gtk.Label(label=title.upper(), xalign=0)
+    head = Gtk.Box(spacing=6)
+    lbl = Gtk.Label(label=title.upper(), xalign=0, hexpand=True)
     lbl.add_css_class("section")
-    box.append(lbl)
+    head.append(lbl)
+    if info:
+        head.append(info_icon(info))
+    box.append(head)
     return box
 
 
-def kv_grid():
-    g = Gtk.Grid(column_spacing=10, row_spacing=4)
-    return g
+def info_icon(text):
+    img = Gtk.Image(icon_name="help-about-symbolic")
+    img.add_css_class("info")
+    img.set_tooltip_text(text)
+    return img
 
 
-def kv(grid, row, key, val_widget):
+def kv(grid, row, key, val_widget, tip=None):
+    kb = Gtk.Box(spacing=5)
     k = Gtk.Label(label=key, xalign=0)
     k.add_css_class("dim")
-    grid.attach(k, 0, row, 1, 1)
+    kb.append(k)
+    if tip:
+        kb.append(info_icon(tip))
+    grid.attach(kb, 0, row, 1, 1)
     grid.attach(val_widget, 1, row, 1, 1)
     return val_widget
+
+
+def icon_button(icon, tooltip, cb, label=None, css=None):
+    b = Gtk.Button(tooltip_text=tooltip)
+    if label:
+        b.set_child(Adw.ButtonContent(icon_name=icon, label=label))
+    else:
+        b.set_icon_name(icon)
+    if css:
+        b.add_css_class(css)
+    b.connect("clicked", cb)
+    return b
+
+
+# ---------------------------------------------------------------- fan curve editor
+class CurveEditor(Gtk.Box):
+    def __init__(self, gpu, window):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.gpu = gpu
+        self.window = window
+        self.points = gpu.read_curve()
+        self._drag = None
+        self._moved = False
+
+        self.area = Gtk.DrawingArea(hexpand=True, vexpand=True)
+        self.area.set_size_request(520, 300)
+        self.area.set_draw_func(self._draw)
+        frame = Gtk.Frame()
+        frame.add_css_class("card2")
+        frame.set_child(self.area)
+        self.append(frame)
+
+        drag = Gtk.GestureDrag()
+        drag.connect("drag-begin", self._on_begin)
+        drag.connect("drag-update", self._on_update)
+        drag.connect("drag-end", self._on_end)
+        self.area.add_controller(drag)
+        rc = Gtk.GestureClick(button=3)
+        rc.connect("released", self._on_right)
+        self.area.add_controller(rc)
+        motion = Gtk.EventControllerMotion()
+        motion.connect("motion", self._on_motion)
+        self.area.add_controller(motion)
+        self._cursor = None
+
+        # toolbar
+        bar = Gtk.Box(spacing=8)
+        self.preset = Gtk.DropDown.new_from_strings(["Preset…"] + list(PRESETS))
+        self.preset.set_tooltip_text("Load a preset fan curve")
+        self.preset.connect("notify::selected", self._on_preset)
+        bar.append(self.preset)
+        bar.append(icon_button("list-add-symbolic", "Add a curve point", self._add, label="Point"))
+        bar.append(icon_button("view-refresh-symbolic", "Reload the curve currently on the GPU",
+                               lambda *_: (self._reload()), label="Reload"))
+        self.hint = Gtk.Label(xalign=0, hexpand=True)
+        self.hint.add_css_class("dim")
+        bar.append(self.hint)
+        bar.append(icon_button("emblem-ok-symbolic",
+                               "Apply this curve (manual mode) — asks for authorization",
+                               self._apply, label="Apply", css="suggested-action"))
+        self.append(bar)
+        note = Gtk.Label(
+            label="Drag points to shape the curve · right-click a point to remove · "
+                  "X = GPU temp °C, Y = fan speed %. The dashed line is the current package temp.",
+            xalign=0, wrap=True)
+        note.add_css_class("dim")
+        self.append(note)
+
+    # ---- geometry ----
+    def _plot(self, w, h):
+        return 46, 12, w - 14, h - 26  # L, T, R, B  (x0,y0,x1,y1)
+
+    def _to_px(self, t, p, geo):
+        x0, y0, x1, y1 = geo
+        x = x0 + (t - TMIN) / (TMAX - TMIN) * (x1 - x0)
+        y = y1 - (p / 255) * (y1 - y0)
+        return x, y
+
+    def _to_data(self, x, y, geo):
+        x0, y0, x1, y1 = geo
+        t = TMIN + (x - x0) / max(x1 - x0, 1) * (TMAX - TMIN)
+        p = (y1 - y) / max(y1 - y0, 1) * 255
+        return max(TMIN, min(TMAX, t)), max(0, min(255, p))
+
+    # ---- drawing ----
+    def _draw(self, area, cr, w, h, *_):
+        geo = self._plot(w, h)
+        x0, y0, x1, y1 = geo
+        fg = area.get_color()
+        r, g, b = fg.red, fg.green, fg.blue
+
+        cr.set_source_rgba(r, g, b, 0.10)
+        cr.set_line_width(1)
+        cr.select_font_face("sans", 0, 0)
+        cr.set_font_size(10)
+        for pct in range(0, 101, 25):  # horizontal grid + Y labels
+            yy = y1 - pct / 100 * (y1 - y0)
+            cr.move_to(x0, yy); cr.line_to(x1, yy); cr.stroke()
+            cr.set_source_rgba(r, g, b, 0.5); cr.move_to(6, yy + 3); cr.show_text(f"{pct}%")
+            cr.set_source_rgba(r, g, b, 0.10)
+        for tc in range(TMIN, TMAX + 1, 10):  # vertical grid + X labels
+            xx, _ = self._to_px(tc, 0, geo)
+            cr.move_to(xx, y0); cr.line_to(xx, y1); cr.stroke()
+            cr.set_source_rgba(r, g, b, 0.5); cr.move_to(xx - 8, h - 8); cr.show_text(f"{tc}")
+            cr.set_source_rgba(r, g, b, 0.10)
+
+        pts = sorted(self.points)
+        # filled area under the curve
+        cr.set_source_rgba(0.21, 0.52, 0.89, 0.16)
+        first = self._to_px(pts[0][0], pts[0][1], geo)
+        cr.move_to(first[0], y1)
+        for t, p in pts:
+            px, py = self._to_px(t, p, geo); cr.line_to(px, py)
+        last = self._to_px(pts[-1][0], pts[-1][1], geo)
+        cr.line_to(last[0], y1); cr.close_path(); cr.fill()
+        # curve line
+        cr.set_source_rgba(0.21, 0.52, 0.89, 1.0); cr.set_line_width(2.5)
+        for i, (t, p) in enumerate(pts):
+            px, py = self._to_px(t, p, geo)
+            cr.line_to(px, py) if i else cr.move_to(px, py)
+        cr.stroke()
+        # current pkg temp marker
+        cur = self.gpu.pkg_temp()
+        if cur is not None and TMIN <= cur <= TMAX:
+            mx, _ = self._to_px(cur, 0, geo)
+            cr.set_source_rgba(r, g, b, 0.5); cr.set_line_width(1.2)
+            cr.set_dash([4, 3], 0); cr.move_to(mx, y0); cr.line_to(mx, y1); cr.stroke()
+            cr.set_dash([], 0)
+            cr.move_to(mx + 3, y0 + 10); cr.show_text(f"{cur}°")
+        # point handles
+        for t, p in pts:
+            px, py = self._to_px(t, p, geo)
+            cr.set_source_rgba(0.21, 0.52, 0.89, 1.0); cr.arc(px, py, 6, 0, 6.29); cr.fill()
+            cr.set_source_rgba(1, 1, 1, 0.9); cr.arc(px, py, 2.4, 0, 6.29); cr.fill()
+
+    # ---- interaction ----
+    def _hit(self, x, y):
+        geo = self._plot(self.area.get_width(), self.area.get_height())
+        for i, (t, p) in enumerate(self.points):
+            px, py = self._to_px(t, p, geo)
+            if (px - x) ** 2 + (py - y) ** 2 <= 15 ** 2:
+                return i
+        return None
+
+    def _on_begin(self, g, x, y):
+        self._moved = False
+        self._drag = self._hit(x, y)
+
+    def _on_update(self, g, dx, dy):
+        if self._drag is None:
+            return
+        self._moved = True
+        ok, sx, sy = g.get_start_point()
+        geo = self._plot(self.area.get_width(), self.area.get_height())
+        t, p = self._to_data(sx + dx, sy + dy, geo)
+        pts = self.points
+        lo = pts[self._drag - 1][0] + 1 if self._drag > 0 else TMIN
+        hi = pts[self._drag + 1][0] - 1 if self._drag < len(pts) - 1 else TMAX
+        pts[self._drag][0] = int(max(lo, min(hi, t)))
+        pts[self._drag][1] = int(round(p))
+        self._update_hint()
+        self.area.queue_draw()
+
+    def _on_end(self, g, dx, dy):
+        self._drag = None
+
+    def _on_right(self, g, n, x, y):
+        i = self._hit(x, y)
+        if i is not None and len(self.points) > 2:
+            self.points.pop(i)
+            self.area.queue_draw()
+
+    def _on_motion(self, c, x, y):
+        geo = self._plot(self.area.get_width(), self.area.get_height())
+        t, p = self._to_data(x, y, geo)
+        self._cursor = (int(t), int(p / 255 * 100))
+        self._update_hint()
+
+    def _update_hint(self):
+        c = self._cursor
+        self.hint.set_text(f"cursor {c[0]}°C · {c[1]}%" if c else f"{len(self.points)} points")
+
+    def _add(self, *_):
+        if len(self.points) >= MAX_POINTS:
+            return
+        pts = sorted(self.points)
+        # insert at the widest temperature gap
+        gaps = [(pts[i + 1][0] - pts[i][0], i) for i in range(len(pts) - 1)]
+        _, i = max(gaps) if gaps else (0, 0)
+        nt = (pts[i][0] + pts[i + 1][0]) // 2
+        npv = (pts[i][1] + pts[i + 1][1]) // 2
+        self.points = pts[:i + 1] + [[nt, npv]] + pts[i + 1:]
+        self.area.queue_draw()
+
+    def _on_preset(self, dd, _):
+        i = dd.get_selected()
+        if i > 0:
+            self.points = [list(p) for p in list(PRESETS.values())[i - 1]]
+            self.area.queue_draw()
+            dd.set_selected(0)
+
+    def _reload(self):
+        self.points = self.gpu.read_curve()
+        self.area.queue_draw()
+
+    def _apply(self, *_):
+        pts = sorted(self.points)
+        args = ["xe-fan-curve", "set"] + [f"{int(t)}:{int(p)}" for t, p in pts]
+        run_priv(args, self.window)
 
 
 # ---------------------------------------------------------------- window
 class Window(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="Arc GPU Dashboard")
-        self.set_default_size(880, 560)
+        self.set_default_size(900, 600)
         self.gpu = XeGpu()
 
-        prov = Gtk.CssProvider()
-        prov.load_from_data(CSS)
+        prov = Gtk.CssProvider(); prov.load_from_data(CSS)
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
         tv = Adw.ToolbarView()
         hb = Adw.HeaderBar()
-        hb.set_title_widget(Adw.WindowTitle(title="Arc GPU Dashboard", subtitle="Intel xe"))
-        rb = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh now")
-        rb.connect("clicked", lambda *_: self.refresh())
-        hb.pack_start(rb)
+        self.stack = Adw.ViewStack()
+        switcher = Adw.ViewSwitcher(stack=self.stack, policy=Adw.ViewSwitcherPolicy.WIDE)
+        hb.set_title_widget(switcher)
+        hb.pack_start(icon_button("view-refresh-symbolic", "Refresh readings now",
+                                  lambda *_: self.refresh()))
         tv.add_top_bar(hb)
+        tv.set_content(self.stack)
         self.set_content(tv)
 
         if not self.gpu.present:
-            b = Gtk.Label(label="No Intel xe GPU found (driver not loaded?)", margin_top=40)
-            tv.set_content(b)
+            self.stack.add_titled(Gtk.Label(label="No Intel xe GPU found", margin_top=40),
+                                  "none", "No GPU")
             return
 
-        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+        dash = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
                        margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
-        tv.set_content(root)
-        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        left.set_size_request(340, -1)
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12); left.set_size_request(330, -1)
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True)
-        root.append(left)
-        root.append(right)
+        dash.append(left); dash.append(right)
+        self._build_stats(left); self._build_controls(left); self._build_temps(right)
+        p1 = self.stack.add_titled(dash, "dash", "Dashboard")
+        p1.set_icon_name("utilities-system-monitor-symbolic")
 
-        self._build_stats(left)
-        self._build_controls(left)
-        self._build_temps(right)
+        self.editor = CurveEditor(self.gpu, self)
+        curve_wrap = Gtk.Box(margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
+        curve_wrap.append(self.editor)
+        p2 = self.stack.add_titled(curve_wrap, "curve", "Fan Curve")
+        p2.set_icon_name("power-profile-balanced-symbolic")
 
         self.refresh()
         GLib.timeout_add_seconds(REFRESH_SECONDS, lambda: (self.refresh(), True)[1])
 
-    # ---- left: live stats ----
     def _build_stats(self, parent):
-        c = card("GPU")
-        g = kv_grid()
+        c = card("GPU", "Live readings — Intel Arc (xe) driver via sysfs.")
+        g = Gtk.Grid(column_spacing=10, row_spacing=4)
         self.v_id = kv(g, 0, "device", Gtk.Label(xalign=0))
-        self.v_clk = kv(g, 1, "clock", Gtk.Label(xalign=0))
+        self.v_clk = kv(g, 1, "clock", Gtk.Label(xalign=0),
+                        "Current GPU clock, with the configured min–max and hardware range.")
         self.freq_bar = Gtk.LevelBar(min_value=0, max_value=1, hexpand=True)
         g.attach(self.freq_bar, 0, 2, 2, 1)
-        self.v_pwr = kv(g, 3, "power", Gtk.Label(xalign=0))
-        self.v_fan = kv(g, 4, "fan", Gtk.Label(xalign=0))
-        for w in (self.v_id, self.v_clk, self.v_pwr, self.v_fan):
-            w.set_wrap(False)
-        c.append(g)
-        parent.append(c)
+        self.v_pwr = kv(g, 3, "power", Gtk.Label(xalign=0),
+                        "Power cap (TDP) and the firmware I1 crit limit.")
+        self.v_fan = kv(g, 4, "fan", Gtk.Label(xalign=0),
+                        "Fan RPM, current duty, and mode (manual curve / auto / full).")
+        c.append(g); parent.append(c)
 
-    # ---- left: controls ----
     def _build_controls(self, parent):
-        c = card("Controls")
-        # fan buttons
-        fanrow = Gtk.Box(spacing=6)
-        fanrow.append(Gtk.Label(label="Fan", xalign=0, width_chars=6))
-        for label, args in (("Curve", ["xe-fan-curve", "boot"]),
-                            ("Auto", ["xe-fan-curve", "auto"]),
-                            ("Max", ["xe-fan-curve", "max"])):
-            b = Gtk.Button(label=label, hexpand=True)
-            b.connect("clicked", lambda _w, a=args: run_priv(a, self, self.refresh))
-            fanrow.append(b)
-        c.append(fanrow)
+        c = card("Controls", "Writes run the xe-* helpers via pkexec (asks for your password).")
+        fan = Gtk.Box(spacing=6)
+        fl = Gtk.Label(label="Fan", xalign=0, width_chars=5); fl.add_css_class("dim")
+        fan.append(fl)
+        fan.append(icon_button("document-edit-symbolic", "Open the fan-curve editor",
+                               lambda *_: self.stack.set_visible_child_name("curve"),
+                               label="Curve"))
+        fan.append(icon_button("power-profile-balanced-symbolic",
+                               "Auto: hand the fan back to the card's stock table",
+                               lambda *_: run_priv(["xe-fan-curve", "auto"], self, self.refresh)))
+        fan.append(icon_button("power-profile-performance-symbolic",
+                               "Max: run the fan at full speed",
+                               lambda *_: run_priv(["xe-fan-curve", "max"], self, self.refresh)))
+        c.append(fan)
 
         cl = self.gpu.clocks()
         lo, hi = cl.get("rpn") or 400, cl.get("rp0") or 2400
         self.sp_pow = self._spin(50, 400, 10, self.gpu.power().get("cap_w") or 190)
         self.sp_min = self._spin(lo, hi, 50, cl.get("min") or lo)
         self.sp_max = self._spin(lo, hi, 50, cl.get("max") or hi)
-        grid = kv_grid()
-        kv(grid, 0, "Power cap (W)", self.sp_pow)
-        kv(grid, 1, "Min clock (MHz)", self.sp_min)
-        kv(grid, 2, "Max clock (MHz)", self.sp_max)
-        hint = Gtk.Label(label="min = idle floor · low = cooler idle", xalign=0)
-        hint.add_css_class("dim")
-        grid.attach(hint, 0, 3, 2, 1)
-        c.append(grid)
-
+        g = Gtk.Grid(column_spacing=10, row_spacing=6)
+        kv(g, 0, "Power cap (W)", self.sp_pow, "Board power limit (TDP). Lower = cooler/quieter.")
+        kv(g, 1, "Min clock (MHz)", self.sp_min,
+           "Idle clock floor. Lowering it (e.g. 400) drops idle power/heat; still boosts under load.")
+        kv(g, 2, "Max clock (MHz)", self.sp_max, "Clock ceiling. Lower for less heat/noise under load.")
+        c.append(g)
         btns = Gtk.Box(spacing=6, halign=Gtk.Align.END)
-        rst = Gtk.Button(label="Reset")
-        rst.connect("clicked", lambda *_: run_priv(["xe-gpu-tune", "reset"], self, self.refresh))
-        app = Gtk.Button(label="Apply")
-        app.add_css_class("suggested-action")
-        app.connect("clicked", self.on_apply)
-        btns.append(rst)
-        btns.append(app)
-        c.append(btns)
-        parent.append(c)
+        btns.append(icon_button("edit-undo-symbolic", "Reset power & clocks to hardware defaults",
+                                lambda *_: run_priv(["xe-gpu-tune", "reset"], self, self.refresh),
+                                label="Reset"))
+        btns.append(icon_button("emblem-ok-symbolic", "Apply power cap and clock limits",
+                                self.on_apply, label="Apply", css="suggested-action"))
+        c.append(btns); parent.append(c)
 
-    # ---- right: temperatures ----
     def _build_temps(self, parent):
-        c = card("Temperatures")
+        c = card("Temperatures", "All sensors the driver exposes. Colour = headroom to the crit limit.")
         c.set_vexpand(True)
-        # main sensors (pkg/mctrl/pcie/vram) as a 2x2 of mini cards
         self.main_t = {}
         mg = Gtk.Grid(column_spacing=10, row_spacing=10, column_homogeneous=True)
         for i, name in enumerate(("pkg", "mctrl", "pcie", "vram")):
-            cell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            cell.add_css_class("chip")
-            lab = Gtk.Label(label=name, xalign=0)
-            lab.add_css_class("clbl")
-            val = Gtk.Label(label="-", xalign=0)
-            val.add_css_class("big")
+            cell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2); cell.add_css_class("chip")
+            lab = Gtk.Label(label=name, xalign=0); lab.add_css_class("clbl")
+            val = Gtk.Label(label="-", xalign=0); val.add_css_class("big")
             bar = Gtk.LevelBar(min_value=0, max_value=110, hexpand=True)
-            cell.append(lab)
-            cell.append(val)
-            cell.append(bar)
+            cell.append(lab); cell.append(val); cell.append(bar)
             mg.attach(cell, i % 2, i // 2, 1, 1)
             self.main_t[name] = (cell, val, bar)
         c.append(mg)
-
-        vh = Gtk.Label(label="VRAM CHANNELS", xalign=0)
-        vh.add_css_class("section")
-        vh.set_margin_top(4)
+        vh = Gtk.Label(label="VRAM CHANNELS", xalign=0); vh.add_css_class("section"); vh.set_margin_top(4)
         c.append(vh)
         self.vram_chips = {}
         self.vram_grid = Gtk.Grid(column_spacing=6, row_spacing=6, column_homogeneous=True)
-        c.append(self.vram_grid)
-        parent.append(c)
+        c.append(self.vram_grid); parent.append(c)
 
     def _spin(self, lo, hi, step, val):
         s = Gtk.SpinButton(adjustment=Gtk.Adjustment(lower=lo, upper=hi, step_increment=step,
@@ -282,23 +516,22 @@ class Window(Adw.ApplicationWindow):
         return s
 
     def on_apply(self, _b):
-        run_priv(["xe-gpu-tune", "set",
-                  "--power-w", str(int(self.sp_pow.get_value())),
+        run_priv(["xe-gpu-tune", "set", "--power-w", str(int(self.sp_pow.get_value())),
                   "--clk-min", str(int(self.sp_min.get_value())),
                   "--clk-max", str(int(self.sp_max.get_value()))], self, self.refresh)
 
-    def _set_temp_class(self, widget, cls):
+    def _tc(self, w, cls):
         for x in ("t-cool", "t-warm", "t-hot"):
-            widget.remove_css_class(x)
-        widget.add_css_class(cls)
+            w.remove_css_class(x)
+        w.add_css_class(cls)
 
     def refresh(self, *_):
         g = self.gpu
         ident = g.identity()
         self.v_id.set_text(f"{ident['card']} · {ident['pci']} · {ident['id']}")
         cl = g.clocks()
-        self.v_clk.set_markup(
-            f"<b>{cl.get('cur','?')}</b> MHz  <span alpha='60%'>({cl.get('min','?')}–{cl.get('max','?')}, hw {cl.get('rpn','?')}–{cl.get('rp0','?')})</span>")
+        self.v_clk.set_markup(f"<b>{cl.get('cur','?')}</b> MHz  <span alpha='55%'>"
+                              f"({cl.get('min','?')}–{cl.get('max','?')}, hw {cl.get('rpn','?')}–{cl.get('rp0','?')})</span>")
         if cl.get("cur") and cl.get("rp0"):
             lo = cl.get("rpn") or 0
             self.freq_bar.set_max_value(max(cl["rp0"] - lo, 1))
@@ -308,43 +541,33 @@ class Window(Adw.ApplicationWindow):
         crit = f"  ·  I1 {pw['crit_w']:.1f} W" if pw.get("crit_w") else ""
         self.v_pwr.set_markup(f"cap <b>{cap}</b>{crit}")
         fn = g.fan()
+        duty = f" ({round((fn['duty'] or 0)/255*100)}%)" if fn.get("duty") is not None else ""
         fmax = f" / {fn['max']}" if fn.get("max") else ""
-        self.v_fan.set_markup(f"<b>{fn.get('rpm','?')}</b> rpm{fmax}  <span alpha='60%'>· {fn.get('mode','?')}</span>")
+        self.v_fan.set_markup(f"<b>{fn.get('rpm','?')}</b> rpm{fmax}{duty}  <span alpha='55%'>· {fn.get('mode','?')}</span>")
 
         temps = {t["label"]: t for t in g.temps()}
         hottest = max((t["c"] for t in temps.values()), default=None)
-        # main sensors
         for name, (cell, val, bar) in self.main_t.items():
             t = temps.get(name)
             if not t:
-                val.set_text("—")
-                continue
-            hot = " 🔥" if t["c"] == hottest else ""
-            val.set_text(f"{t['c']}°{hot}")
-            bar.set_max_value(t["crit"] or 110)
-            bar.set_value(min(t["c"], t["crit"] or 110))
-            self._set_temp_class(cell, tclass(t["c"], t["crit"]))
-            self._set_temp_class(val, tclass(t["c"], t["crit"]))
-        # vram channels
+                val.set_text("—"); continue
+            val.set_text(f"{t['c']}°{' 🔥' if t['c'] == hottest else ''}")
+            bar.set_max_value(t["crit"] or 110); bar.set_value(min(t["c"], t["crit"] or 110))
+            self._tc(cell, tclass(t["c"], t["crit"])); self._tc(val, tclass(t["c"], t["crit"]))
         chans = sorted((t for lbl, t in temps.items() if lbl.startswith("vram_ch_")),
                        key=lambda t: int(t["label"].rsplit("_", 1)[-1]))
         for i, t in enumerate(chans):
             key = t["label"]
             if key not in self.vram_chips:
-                chip = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-                chip.add_css_class("chip")
-                cl_ = Gtk.Label(label="ch" + key.rsplit("_", 1)[-1], xalign=0.5)
-                cl_.add_css_class("clbl")
-                cv = Gtk.Label(xalign=0.5)
-                cv.add_css_class("cval")
-                chip.append(cl_)
-                chip.append(cv)
+                chip = Gtk.Box(orientation=Gtk.Orientation.VERTICAL); chip.add_css_class("chip")
+                cl_ = Gtk.Label(label="ch" + key.rsplit("_", 1)[-1], xalign=0.5); cl_.add_css_class("clbl")
+                cv = Gtk.Label(xalign=0.5); cv.add_css_class("cval")
+                chip.append(cl_); chip.append(cv)
                 self.vram_grid.attach(chip, i % 4, i // 4, 1, 1)
                 self.vram_chips[key] = (chip, cv)
             chip, cv = self.vram_chips[key]
-            mark = " 🔥" if t["c"] == hottest else ""
-            cv.set_text(f"{t['c']}°{mark}")
-            self._set_temp_class(chip, tclass(t["c"], t["crit"]))
+            cv.set_text(f"{t['c']}°{' 🔥' if t['c'] == hottest else ''}")
+            self._tc(chip, tclass(t["c"], t["crit"]))
         return False
 
 

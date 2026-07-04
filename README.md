@@ -18,13 +18,13 @@ Related upstream issue: [intel/compute-runtime #885](https://github.com/intel/co
 | Read fan RPM / temps | ✅ | ✅ |
 | Write fan speed (`pwm1`) | ❌ | ✅ |
 | 10-point fan curve (`pwm1_auto_point*`) | ❌ | ✅ |
-| CoolerControl GUI management | read-only | ✅ manual / graph |
+| Graphical fan-curve editor | — | ✅ built-in (`xe-gpu-gui`, draggable points) |
 | GPU power cap (TDP) | ✅ sysfs | ✅ + persistent helper |
 | GPU clock min/max limits | ✅ sysfs | ✅ + persistent helper |
 | Idle power/heat optimization | ❌ (idles at 1200 MHz) | ✅ (idles at 400 MHz) |
 | All-sensor temp/health monitor | raw sysfs | ✅ `xe-gpu-temps` (table/watch/json) |
 | Single-command status dashboard | — | ✅ `xe-gpu` (fan+clocks+power+temps) |
-| Native desktop GUI | — | ✅ `xe-gpu-gui` (GTK4/libadwaita, live + controls) |
+| Native desktop GUI | — | ✅ `xe-gpu-gui` (GTK4: live dashboard + fan-curve editor) |
 | Survives reboots | — | ✅ systemd |
 | Survives kernel updates | — | ✅ auto-rebuild hook |
 
@@ -70,7 +70,7 @@ Full step-by-step (with the module install/reload, `.zst` gotcha, and verificati
 ## Usage
 
 ```bash
-# native desktop GUI (GTK4/libadwaita): live monitor + fan/power/clock controls
+# native desktop GUI (GTK4/libadwaita): live dashboard + graphical fan-curve editor
 xe-gpu-gui             # or launch "Arc GPU Dashboard" from your apps menu
 
 # one-stop dashboard + front-end (wraps the tools below)
@@ -97,7 +97,7 @@ xe-gpu-temps watch 2    # live refresh every 2s
 xe-gpu-temps json       # machine-readable (for scripts / dashboards)
 ```
 
-- GUI fan curves via **CoolerControl** — see [docs/COOLERCONTROL.md](docs/COOLERCONTROL.md).
+- GUI fan curves via the **built-in editor** (`xe-gpu-gui`) — see [docs/GUI.md](docs/GUI.md).
 - GPU tuning details — see [docs/GPU-TUNING.md](docs/GPU-TUNING.md).
 - Persistent config: `/etc/xe-fan-curve.conf`, `/etc/xe-gpu-tune.conf`.
 

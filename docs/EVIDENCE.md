@@ -27,7 +27,7 @@ stock curve (pwm1_auto_pointN_temp -> _pwm):
 In `pwm1_enable=2` (auto-stock), the fan stays at **0 RPM at 60 °C** — the Pro card has no
 autonomous fan firmware on Linux. But that does **not** block manual control: the user-table
 PCODE writes work regardless. So an always-active user curve (this toolkit's systemd service, or
-CoolerControl) is what makes the fan respond to heat.
+the built-in `xe-gpu-gui` curve editor) is what makes the fan respond to heat.
 
 ## GPU tuning (driver sysfs, no patch)
 - `min_freq` 1200 -> 400 MHz: `cur_freq` immediately dropped to 400 at idle (idle power/heat saving;
