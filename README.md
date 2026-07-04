@@ -23,6 +23,7 @@ Related upstream issue: [intel/compute-runtime #885](https://github.com/intel/co
 | GPU clock min/max limits | ✅ sysfs | ✅ + persistent helper |
 | Idle power/heat optimization | ❌ (idles at 1200 MHz) | ✅ (idles at 400 MHz) |
 | All-sensor temp/health monitor | raw sysfs | ✅ `xe-gpu-temps` (table/watch/json) |
+| Single-command status dashboard | — | ✅ `xe-gpu` (fan+clocks+power+temps) |
 | Survives reboots | — | ✅ systemd |
 | Survives kernel updates | — | ✅ auto-rebuild hook |
 
@@ -53,6 +54,7 @@ sudo APPLY=1 bash scripts/apply_xefan.sh         # apply + build
 sudo install -m755 scripts/xe-fan-curve.sh  /usr/local/bin/xe-fan-curve
 sudo install -m755 scripts/xe-gpu-tune.sh   /usr/local/bin/xe-gpu-tune
 sudo install -m755 scripts/xe-gpu-temps.sh  /usr/local/bin/xe-gpu-temps
+sudo install -m755 scripts/xe-gpu.sh        /usr/local/bin/xe-gpu
 sudo install -m755 scripts/xe-fan-rebuild.sh /usr/local/sbin/xe-fan-rebuild
 sudo install -m755 kernel-hook/zz-xe-fan-rebuild /etc/kernel/postinst.d/zz-xe-fan-rebuild
 sudo cp systemd/etc/*.conf /etc/
@@ -67,6 +69,13 @@ Full step-by-step (with the module install/reload, `.zst` gotcha, and verificati
 ## Usage
 
 ```bash
+# one-stop dashboard + front-end (wraps the tools below)
+xe-gpu                 # status: card + clocks + power + fan + temps in one view
+xe-gpu watch           # live dashboard
+xe-gpu fan set 45:80 55:130 65:180 75:220 85:255   # -> xe-fan-curve
+xe-gpu tune set --power-w 150                        # -> xe-gpu-tune
+xe-gpu temps                                         # -> xe-gpu-temps
+
 # fan
 sudo xe-fan-curve show
 sudo xe-fan-curve set 45:80 55:130 65:180 75:220 85:255   # temp°C : pwm(0-255)
