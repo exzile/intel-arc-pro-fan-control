@@ -205,6 +205,7 @@ class CurveEditor(Gtk.Box):
         self.gpu = gpu
         self.window = window
         self.points = gpu.read_curve()
+        self.applied = [list(p) for p in self.points]   # what's currently on the GPU
         self._drag = None
         self._moved = False
 
@@ -244,9 +245,10 @@ class CurveEditor(Gtk.Box):
         self.hint = Gtk.Label(xalign=0, hexpand=True)
         self.hint.add_css_class("dim")
         bar.append(self.hint)
-        bar.append(icon_button("emblem-ok-symbolic",
-                               "Apply this curve (manual mode) — asks for authorization",
-                               self._apply, label="Apply", css="suggested-action"))
+        self.apply_btn = icon_button("emblem-ok-symbolic",
+                                     "Apply this curve (manual mode) — asks for authorization",
+                                     self._apply, label="Apply", css="suggested-action")
+        bar.append(self.apply_btn)
         self.append(bar)
         note = Gtk.Label(
             label="Drag points to shape the curve · right-click a point to remove · "
@@ -254,6 +256,10 @@ class CurveEditor(Gtk.Box):
             xalign=0, wrap=True)
         note.add_css_class("dim")
         self.append(note)
+        self._mark()
+
+    def _mark(self):
+        self.apply_btn.set_visible(sorted(self.points) != sorted(self.applied))
 
     # ---- geometry ----
     def _plot(self, w, h):
@@ -349,6 +355,7 @@ class CurveEditor(Gtk.Box):
         pts[self._drag][1] = int(round(p))
         self._update_hint()
         self.area.queue_draw()
+        self._mark()
 
     def _on_end(self, g, dx, dy):
         self._drag = None
@@ -358,6 +365,7 @@ class CurveEditor(Gtk.Box):
         if i is not None and len(self.points) > 2:
             self.points.pop(i)
             self.area.queue_draw()
+            self._mark()
 
     def _on_motion(self, c, x, y):
         geo = self._plot(self.area.get_width(), self.area.get_height())
@@ -380,26 +388,37 @@ class CurveEditor(Gtk.Box):
         npv = (pts[i][1] + pts[i + 1][1]) // 2
         self.points = pts[:i + 1] + [[nt, npv]] + pts[i + 1:]
         self.area.queue_draw()
+        self._mark()
 
     def _on_preset(self, dd, _):
         i = dd.get_selected()
         if i > 0:
-            self.points = [list(p) for p in list(PRESETS.values())[i - 1]]
+            name = list(PRESETS)[i - 1]
+            self.points = [list(p) for p in PRESETS[name]]
             self.area.queue_draw()
+            self._mark()
+            self.window.toast(f"Loaded “{name}” preset — press Apply to write it")
             dd.set_selected(0)
 
     def _reload(self):
         self.points = self.gpu.read_curve()
+        self.applied = [list(p) for p in self.points]
         self.area.queue_draw()
+        self._mark()
+        self.window.toast("Reloaded the curve currently on the GPU")
 
     def _stock(self, *_):
         # hand the fan back to the card's stock auto table (pwm1_enable=2)
         run_priv(["xe-fan-curve", "auto"], self.window)
+        self.window.toast("Reverting the fan to the stock auto table…")
 
     def _apply(self, *_):
         pts = sorted(self.points)
         args = ["xe-fan-curve", "set"] + [f"{int(t)}:{int(p)}" for t, p in pts]
         run_priv(args, self.window)
+        self.applied = [list(p) for p in pts]
+        self._mark()
+        self.window.toast(f"Applying fan curve ({len(pts)} points)…")
 
 
 # ---------------------------------------------------------------- window
@@ -422,7 +441,9 @@ class Window(Adw.ApplicationWindow):
                                   lambda *_: self.refresh()))
         tv.add_top_bar(hb)
         tv.set_content(self.stack)
-        self.set_content(tv)
+        self.toasts = Adw.ToastOverlay()
+        self.toasts.set_child(tv)
+        self.set_content(self.toasts)
 
         if not self.gpu.present:
             self.stack.add_titled(Gtk.Label(label="No Intel xe GPU found", margin_top=40),
@@ -446,6 +467,9 @@ class Window(Adw.ApplicationWindow):
 
         self.refresh()
         GLib.timeout_add_seconds(REFRESH_SECONDS, lambda: (self.refresh(), True)[1])
+
+    def toast(self, msg, timeout=3):
+        self.toasts.add_toast(Adw.Toast(title=msg, timeout=timeout))
 
     def _build_stats(self, parent):
         c = card("GPU", "Live readings — Intel Arc (xe) driver via sysfs.")
@@ -488,13 +512,39 @@ class Window(Adw.ApplicationWindow):
            "Idle clock floor. Lowering it (e.g. 400) drops idle power/heat; still boosts under load.")
         kv(g, 2, "Max clock (MHz)", self.sp_max, "Clock ceiling. Lower for less heat/noise under load.")
         c.append(g)
+        self.tune_base = self._tune_vals()
+        for sp in (self.sp_pow, self.sp_min, self.sp_max):
+            sp.connect("value-changed", lambda *_: self._mark_tune())
         btns = Gtk.Box(spacing=6, halign=Gtk.Align.END)
         btns.append(icon_button("edit-undo-symbolic", "Reset power & clocks to hardware defaults",
-                                lambda *_: run_priv(["xe-gpu-tune", "reset"], self, self.refresh),
-                                label="Reset"))
-        btns.append(icon_button("emblem-ok-symbolic", "Apply power cap and clock limits",
-                                self.on_apply, label="Apply", css="suggested-action"))
+                                self._reset_tune, label="Reset"))
+        self.tune_apply = icon_button("emblem-ok-symbolic", "Apply power cap and clock limits",
+                                      self.on_apply, label="Apply", css="suggested-action")
+        btns.append(self.tune_apply)
         c.append(btns); parent.append(c)
+        self._mark_tune()
+
+    def _tune_vals(self):
+        return (self.sp_pow.get_value(), self.sp_min.get_value(), self.sp_max.get_value())
+
+    def _mark_tune(self):
+        self.tune_apply.set_visible(self._tune_vals() != self.tune_base)
+
+    def _reset_tune(self, *_):
+        run_priv(["xe-gpu-tune", "reset"], self, self._after_reset)
+        self.toast("Resetting power & clocks to hardware defaults…")
+
+    def _after_reset(self):
+        self.refresh()
+        cl = self.gpu.clocks(); pw = self.gpu.power()
+        if cl.get("min"):
+            self.sp_min.set_value(cl["min"])
+        if cl.get("max"):
+            self.sp_max.set_value(cl["max"])
+        if pw.get("cap_w"):
+            self.sp_pow.set_value(pw["cap_w"])
+        self.tune_base = self._tune_vals()
+        self._mark_tune()
 
     def _build_temps(self, parent):
         c = card("Temperatures", "All sensors the driver exposes. Colour = headroom to the crit limit.")
@@ -526,6 +576,10 @@ class Window(Adw.ApplicationWindow):
         run_priv(["xe-gpu-tune", "set", "--power-w", str(int(self.sp_pow.get_value())),
                   "--clk-min", str(int(self.sp_min.get_value())),
                   "--clk-max", str(int(self.sp_max.get_value()))], self, self.refresh)
+        self.tune_base = self._tune_vals()
+        self._mark_tune()
+        self.toast(f"Applying: {int(self.sp_pow.get_value())} W · "
+                   f"{int(self.sp_min.get_value())}–{int(self.sp_max.get_value())} MHz")
 
     def _tc(self, w, cls):
         for x in ("t-cool", "t-warm", "t-hot"):
