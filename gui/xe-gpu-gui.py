@@ -3,7 +3,7 @@
 # Tabs: Dashboard (live stats + tuning) and Fan Curve (graphical draggable editor).
 # Controls call xe-fan-curve / xe-gpu-tune via pkexec (polkit prompts for writes).
 # Reads are unprivileged sysfs; no kernel poking here.
-import os, glob, subprocess
+import os, glob, subprocess, threading
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -92,24 +92,44 @@ class XeGpu:
                 "duty": _int(os.path.join(self.hwmon, "pwm1")),
                 "mode": {0: "full", 1: "manual curve", 2: "auto"}.get(pwm, "?")}
 
-    def temps(self):
+    def tmap(self):
+        # cache (label, input_path, crit_c) once — labels/crit are static
+        if getattr(self, "_tmap_cache", None) is None:
+            m = []
+            for f in sorted(glob.glob(os.path.join(self.hwmon or "_", "temp*_input"))):
+                base = os.path.join(self.hwmon, "temp" + os.path.basename(f)[4:-6])
+                crit = _int(base + "_crit")
+                m.append((_read(base + "_label") or os.path.basename(base), f,
+                          (crit // 1000) if crit else None))
+            self._tmap_cache = m
+        return self._tmap_cache
+
+    def temps_where(self, channel):
+        # channel=False -> pkg/mctrl/pcie/vram (fast); True -> vram_ch_* (slow, ~100ms each)
         out = []
-        for f in sorted(glob.glob(os.path.join(self.hwmon or "_", "temp*_input"))):
-            n = os.path.basename(f)[4:-6]
-            inp = _int(f)
-            if inp is None:
+        for lbl, f, crit in self.tmap():
+            if lbl.startswith("vram_ch_") != channel:
                 continue
-            base = os.path.join(self.hwmon, f"temp{n}")
-            crit = _int(base + "_crit")
-            out.append({"label": _read(base + "_label") or f"temp{n}",
-                        "c": inp // 1000, "crit": (crit // 1000) if crit else None})
+            v = _int(f)
+            if v is not None:
+                out.append({"label": lbl, "c": v // 1000, "crit": crit})
         return out
 
+    def temps(self):
+        return self.temps_where(False) + self.temps_where(True)
+
     def pkg_temp(self):
-        for t in self.temps():
-            if t["label"] == "pkg":
-                return t["c"]
+        for lbl, f, crit in self.tmap():
+            if lbl == "pkg":
+                v = _int(f)
+                return v // 1000 if v is not None else None
         return None
+
+    def snapshot(self):
+        # one full read of everything — call this OFF the main thread
+        return {"id": self.identity(), "clocks": self.clocks(), "power": self.power(),
+                "fan": self.fan(), "mains": self.temps_where(False),
+                "vram": self.temps_where(True)}
 
     def read_curve(self):
         pts = []
@@ -223,6 +243,7 @@ class CurveEditor(Gtk.Box):
         self.window = window
         self.points = gpu.read_curve()
         self.applied = [list(p) for p in self.points]   # what's currently on the GPU
+        self.cur_pkg = gpu.pkg_temp()   # cached; updated by the window refresh (no per-frame read)
         self._drag = None
         self._moved = False
 
@@ -331,8 +352,8 @@ class CurveEditor(Gtk.Box):
             px, py = self._to_px(t, p, geo)
             cr.line_to(px, py) if i else cr.move_to(px, py)
         cr.stroke()
-        # current pkg temp marker
-        cur = self.gpu.pkg_temp()
+        # current pkg temp marker (cached — no sysfs read in the draw path)
+        cur = self.cur_pkg
         if cur is not None and TMIN <= cur <= TMAX:
             mx, _ = self._to_px(cur, 0, geo)
             cr.set_source_rgba(r, g, b, 0.5); cr.set_line_width(1.2)
@@ -482,8 +503,10 @@ class Window(Adw.ApplicationWindow):
         p2 = self.stack.add_titled(curve_wrap, "curve", "Fan Curve")
         p2.set_icon_name("power-profile-balanced-symbolic")
 
-        self.refresh()
-        GLib.timeout_add_seconds(REFRESH_SECONDS, lambda: (self.refresh(), True)[1])
+        self.tcache = {}          # label -> °C
+        self._reading = False
+        self._tick()              # first async snapshot
+        GLib.timeout_add_seconds(REFRESH_SECONDS, self._tick)
 
     def toast(self, msg, ms=2500):
         # timeout=0 keeps Adw from auto-dismissing; we dismiss manually for a precise 2.5s.
@@ -607,37 +630,61 @@ class Window(Adw.ApplicationWindow):
         w.add_css_class(cls)
 
     def refresh(self, *_):
-        g = self.gpu
-        ident = g.identity()
+        self._tick()      # trigger an async read (used by control after-callbacks)
+        return False
+
+    def _tick(self):
+        # ALL sysfs reads run off the main thread — the first read after GPU idle
+        # forces a wake (~0.8-1.4s); doing it here would freeze the UI.
+        if self._reading:
+            return True
+        self._reading = True
+
+        def work():
+            try:
+                data = self.gpu.snapshot()
+            except Exception:
+                data = None
+            GLib.idle_add(self._apply, data)
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
+    def _apply(self, data):
+        self._reading = False
+        if not data:
+            return False
+        ident = data["id"]
         self.v_id.set_text(f"{ident['card']} · {ident['pci']} · {ident['id']}")
-        cl = g.clocks()
+        cl = data["clocks"]
         self.v_clk.set_markup(f"<b>{cl.get('cur','?')}</b> MHz  <span alpha='55%'>"
                               f"({cl.get('min','?')}–{cl.get('max','?')}, hw {cl.get('rpn','?')}–{cl.get('rp0','?')})</span>")
         if cl.get("cur") and cl.get("rp0"):
             lo = cl.get("rpn") or 0
             self.freq_bar.set_max_value(max(cl["rp0"] - lo, 1))
             self.freq_bar.set_value(max(min(cl["cur"] - lo, cl["rp0"] - lo), 0))
-        pw = g.power()
+        pw = data["power"]
         cap = f"{pw['cap_w']} W" if pw.get("cap_w") else "unset"
         crit = f"  ·  I1 {pw['crit_w']:.1f} W" if pw.get("crit_w") else ""
         self.v_pwr.set_markup(f"cap <b>{cap}</b>{crit}")
-        fn = g.fan()
+        fn = data["fan"]
         duty = f" ({round((fn['duty'] or 0)/255*100)}%)" if fn.get("duty") is not None else ""
         fmax = f" / {fn['max']}" if fn.get("max") else ""
         self.v_fan.set_markup(f"<b>{fn.get('rpm','?')}</b> rpm{fmax}{duty}  <span alpha='55%'>· {fn.get('mode','?')}</span>")
 
-        temps = {t["label"]: t for t in g.temps()}
-        hottest = max((t["c"] for t in temps.values()), default=None)
+        mains = {t["label"]: t for t in data["mains"]}
+        for t in data["mains"] + data["vram"]:
+            self.tcache[t["label"]] = t["c"]
+        if "pkg" in mains:
+            self.editor.cur_pkg = mains["pkg"]["c"]
+        hottest = max(self.tcache.values(), default=None)
         for name, (cell, val, bar) in self.main_t.items():
-            t = temps.get(name)
+            t = mains.get(name)
             if not t:
                 val.set_text("—"); continue
             val.set_text(f"{t['c']}°{' 🔥' if t['c'] == hottest else ''}")
             bar.set_max_value(t["crit"] or 110); bar.set_value(min(t["c"], t["crit"] or 110))
             self._tc(cell, tclass(t["c"], t["crit"])); self._tc(val, tclass(t["c"], t["crit"]))
-        chans = sorted((t for lbl, t in temps.items() if lbl.startswith("vram_ch_")),
-                       key=lambda t: int(t["label"].rsplit("_", 1)[-1]))
-        for i, t in enumerate(chans):
+        for i, t in enumerate(sorted(data["vram"], key=lambda x: int(x["label"].rsplit("_", 1)[-1]))):
             key = t["label"]
             if key not in self.vram_chips:
                 chip = Gtk.Box(orientation=Gtk.Orientation.VERTICAL); chip.add_css_class("chip")
