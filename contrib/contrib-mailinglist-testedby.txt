@@ -30,8 +30,10 @@ POINTS are accepted directly by PCODE. (In auto-stock mode the fan does not spin
 autonomously, consistent with the missing autonomous firmware, but that does not
 block manual control.)
 
-Tested-by: <Your Name> <your@email>
+Tested-by: Joey Pongallo <joeypongallo@gmail.com>
 
-# ^ Replace with the exact name/email you want on the public record. This is the
-#   same identity you'll use for git send-email below. First name + last name,
-#   real email (kernel requires a real, reachable address for Tested-by/S-o-b).
+# Send this reply as PLAIN TEXT (no HTML) to the [PATCH v1 0/5] cover letter of
+# series 168027, keeping To: the author + intel-xe@lists.freedesktop.org and the
+# In-Reply-To/References headers so it threads. Everything above the "reply body
+# below" line is instructions — send only the body (from "Tested this series..."
+# through the Tested-by line).

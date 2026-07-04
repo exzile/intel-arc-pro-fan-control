@@ -31,7 +31,7 @@ alone is still valuable — it's where Pro-card owners and Intel folks are watch
 ### One-time setup
 ```
 # 1. identity + send-email (App Password entered at send time, never stored)
-./setup-git-sendemail.sh "Your Name" you@gmail.com
+./scripts/setup-git-sendemail.sh "Joey Pongallo" joeypongallo@gmail.com
 
 # 2. get the xe development tree (drm-xe-next is where xe patches land first)
 git clone https://gitlab.freedesktop.org/drm/xe/kernel.git linux-xe
