@@ -141,16 +141,33 @@ def tclass(c, crit):
     return "t-cool"
 
 
+HELPER_PATHS = {"xe-fan-curve": "/usr/local/bin/xe-fan-curve",
+                "xe-gpu-tune": "/usr/local/bin/xe-gpu-tune"}
+
+
 def run_priv(args, parent, after=None):
+    # pkexec sanitizes PATH (often no /usr/local/bin) -> use absolute paths.
+    args = [HELPER_PATHS.get(args[0], args[0])] + list(args[1:])
     try:
-        subprocess.Popen(["pkexec"] + args)
-        if after:
-            GLib.timeout_add(1200, lambda: (after(), False)[1])
+        p = subprocess.Popen(["pkexec"] + args, stderr=subprocess.PIPE, text=True)
     except OSError as e:
-        d = Adw.MessageDialog(transient_for=parent, heading="Command failed",
-                              body=f"{' '.join(args)}\n{e}")
-        d.add_response("ok", "OK")
-        d.present()
+        parent.toast(f"Could not run: {e}")
+        return
+
+    def check():
+        rc = p.poll()
+        if rc is None:
+            return True  # still running / awaiting authorization
+        if rc == 0:
+            if after:
+                after()
+        elif rc == 126:   # pkexec: authorization dismissed / not authorized
+            parent.toast("Authorization cancelled")
+        else:
+            err = (p.stderr.read() or "").strip().splitlines()
+            parent.toast("Failed: " + (err[-1] if err else f"exit {rc}"))
+        return False
+    GLib.timeout_add(250, check)
 
 
 # ---------------------------------------------------------------- small widgets
@@ -468,8 +485,11 @@ class Window(Adw.ApplicationWindow):
         self.refresh()
         GLib.timeout_add_seconds(REFRESH_SECONDS, lambda: (self.refresh(), True)[1])
 
-    def toast(self, msg, timeout=3):
-        self.toasts.add_toast(Adw.Toast(title=msg, timeout=timeout))
+    def toast(self, msg, ms=2500):
+        # timeout=0 keeps Adw from auto-dismissing; we dismiss manually for a precise 2.5s.
+        t = Adw.Toast(title=msg, timeout=0)
+        self.toasts.add_toast(t)
+        GLib.timeout_add(ms, lambda: (t.dismiss(), False)[1])
 
     def _build_stats(self, parent):
         c = card("GPU", "Live readings — Intel Arc (xe) driver via sysfs.")
