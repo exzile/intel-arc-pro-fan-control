@@ -1,0 +1,9 @@
+#!/bin/sh
+# /etc/kernel/postinst.d/zz-xe-fan-rebuild
+# After a new kernel is installed, rebuild the patched (fan-control) xe.ko for it.
+# Best-effort + fail-safe: xe-fan-rebuild logs loudly and never blocks the kernel install.
+KREL="$1"
+[ -n "$KREL" ] || exit 0
+[ -x /usr/local/sbin/xe-fan-rebuild ] || exit 0
+/usr/local/sbin/xe-fan-rebuild "$KREL" || true   # never fail the kernel postinst
+exit 0

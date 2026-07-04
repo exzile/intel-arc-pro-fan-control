@@ -1,0 +1,37 @@
+Subject: Re: [PATCH v1 0/5] Add fan control support
+
+Reply to the cover letter of series 168027 on intel-xe@lists.freedesktop.org.
+Find the thread at: https://lore.kernel.org/intel-xe/?q=Add+fan+control+support
+(or via https://patchwork.freedesktop.org/series/168027/ -> "atom/mbox" -> reply
+in your mail client to the [PATCH v1 0/5] message so the References/In-Reply-To
+threading is preserved).
+
+--------------------------- reply body below ---------------------------
+
+Tested this series on an Intel Arc Pro B60 (Battlemage G21, 8086:e211,
+subsystem ASRock 1849:6023) on 7.0.0-27-generic (Ubuntu 26.04), applied to the
+stock xe_hwmon.c / xe_pcode_api.h and built as an out-of-tree xe.ko.
+
+All exposed nodes work on this Pro Battlemage device ID:
+
+  - fan1_max reads 4980 RPM.
+  - pwm1_auto_point[1-10]_{temp,pwm} read back the card's stock fan table over
+    FAN_SPEED_CONTROL (e.g. 59C->0, 60C->51, 65C->77, 70C->102, 75C->153,
+    79C->204, 84C->255).
+  - pwm1_enable=0 (full speed): fan ramps 0 -> ~4940 RPM (== fan1_max).
+  - pwm1_enable=1 with a user pwm1_auto_point* curve: fan tracks the curve
+    (held ~2400 RPM at 48C and actively cooled 48C -> 44C).
+  - Direct pwm1 writes work too (pwm1=180 -> ~3540 RPM, pwm1=60 -> ~1171 RPM).
+  - No dmesg faults during any of the above.
+
+Notably the B60 does not need the MEI late-bind fan-control firmware blob for
+the manual/user-table path -- FSC_WRITE_FAN_TABLE / FSC_WRITE_NUM_FAN_CONTROL_
+POINTS are accepted directly by PCODE. (In auto-stock mode the fan does not spin
+autonomously, consistent with the missing autonomous firmware, but that does not
+block manual control.)
+
+Tested-by: <Your Name> <your@email>
+
+# ^ Replace with the exact name/email you want on the public record. This is the
+#   same identity you'll use for git send-email below. First name + last name,
+#   real email (kernel requires a real, reachable address for Tested-by/S-o-b).

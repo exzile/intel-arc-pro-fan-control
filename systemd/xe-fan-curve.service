@@ -1,0 +1,16 @@
+[Unit]
+Description=Apply custom Intel Arc (xe) GPU fan curve
+# Run after the graphics stack is up so the xe hwmon sysfs exists
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Retry briefly in case the hwmon device isn't ready the instant we run
+ExecStart=/bin/sh -c 'for i in $(seq 1 15); do /usr/local/bin/xe-fan-curve boot && exit 0; sleep 2; done; exit 1'
+# On stop (shutdown), hand the fan back to the GPU's safe auto-stock table
+ExecStop=/usr/local/bin/xe-fan-curve auto
+
+[Install]
+WantedBy=multi-user.target

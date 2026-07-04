@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply Intel Arc (xe) GPU power/clock tuning
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for i in $(seq 1 15); do /usr/local/bin/xe-gpu-tune boot && exit 0; sleep 2; done; exit 1'
+ExecStop=/usr/local/bin/xe-gpu-tune reset
+
+[Install]
+WantedBy=multi-user.target
