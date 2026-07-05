@@ -177,6 +177,19 @@ class XeGpu:
                 out.append(int(f[1]))
         return out
 
+    def oc_offset(self):
+        # persisted VF-curve offset (mV) from /etc/xe-gpu-oc.conf; 0 = stock, None = custom curve
+        for line in (_read("/etc/xe-gpu-oc.conf") or "").splitlines():
+            if line.strip().startswith("VOLTAGE_OFFSET="):
+                v = line.split("=", 1)[1].strip()
+                if v == "custom":
+                    return None
+                try:
+                    return int(v)
+                except ValueError:
+                    return 0
+        return 0
+
 
 PRESETS = {
     "Silent":     [[40, 0], [55, 45], [70, 100], [82, 170], [90, 255]],
@@ -593,6 +606,9 @@ class VoltageCurveView(Gtk.Box):
 
     def _loaded(self, data):
         self._loading = False
+        # restore the persisted last choice so we show it (not stock) on load
+        off = self.gpu.oc_offset()
+        self.applied = off if isinstance(off, int) else 0
         if data:
             # the live curve already includes self.applied; baseline = live − applied
             self.stock = [v - self.applied for v in data]
@@ -619,16 +635,16 @@ class VoltageCurveView(Gtk.Box):
         self._hint(); self.area.queue_draw(); self._mark()
 
     def _apply(self, *_):
-        delta = int(self.offset) - int(self.applied)
-        if not delta:
-            return
         want = int(self.offset)
+        if want == int(self.applied):
+            return
 
         def ok():
             self.applied = want
             self._hint(); self._mark()
-        run_priv(["xe-gpu-oc", "offset", str(delta)], self.window, ok)
-        self.window.toast(f"Applying voltage offset {'+' if want > 0 else ''}{want} mV…")
+        # 'offset' is absolute-from-stock and persisted -> re-applied at boot
+        run_priv(["xe-gpu-oc", "offset", str(want)], self.window, ok)
+        self.window.toast(f"Applying voltage offset {'+' if want > 0 else ''}{want} mV (saved)…")
 
     def _reset(self, *_):
         def ok():

@@ -56,7 +56,26 @@ sudo xe-gpu oc reset             # restore the saved stock curve
 ```
 
 The first change saves the stock curve to `/var/lib/xe-gpu-oc/stock-curve`, so
-`reset` always brings you back.
+`reset` always brings you back. `offset` is **absolute from stock** (not cumulative),
+so `offset -25` always means "stock minus 25 mV" no matter what's currently applied.
+
+## Persistence across reboots
+
+The GPU **forgets** the curve on every cold boot — the firmware re-provisions stock.
+So your choice is saved to `/etc/xe-gpu-oc.conf` (`VOLTAGE_OFFSET=…`) and re-applied at
+boot by a systemd unit:
+
+```bash
+sudo cp systemd/xe-gpu-oc.service /etc/systemd/system/
+sudo cp systemd/etc/xe-gpu-oc.conf /etc/            # template (managed for you)
+sudo systemctl daemon-reload
+sudo systemctl enable --now xe-gpu-oc.service       # re-applies VOLTAGE_OFFSET at boot
+```
+
+Every `xe-gpu-oc offset` / `reset` (and the GUI's Apply/Reset) rewrites the config, so
+whatever you last chose comes back automatically after a reboot. The GUI's Overclock tab
+also reads the saved offset on launch, so it opens showing your current setting rather
+than resetting to zero. `xe-gpu-oc status` prints the persisted value.
 
 ### A complete overclock
 

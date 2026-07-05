@@ -1,0 +1,15 @@
+[Unit]
+Description=Re-apply Intel Arc (xe) GPU voltage-frequency curve overclock
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The card resets the VF curve to stock on cold boot; re-apply the persisted
+# offset. Retry a few times in case the xe_gt_oc sysfs isn't up yet.
+ExecStart=/bin/sh -c 'for i in $(seq 1 15); do /usr/local/bin/xe-gpu-oc boot && exit 0; sleep 2; done; exit 1'
+ExecStop=/usr/local/bin/xe-gpu-oc reset
+
+[Install]
+WantedBy=multi-user.target

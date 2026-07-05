@@ -78,6 +78,8 @@ sudo cp systemd/etc/*.conf /etc/
 sudo cp systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now xe-fan-curve.service xe-gpu-tune.service
+# if you installed the OC patch (below), also persist the voltage curve across reboots:
+sudo systemctl enable --now xe-gpu-oc.service
 ```
 
 Full step-by-step (with the module install/reload, `.zst` gotcha, and verification):
