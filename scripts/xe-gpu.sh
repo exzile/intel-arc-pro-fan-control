@@ -111,10 +111,12 @@ case "${1:-status}" in
   fan)   shift; delegate xe-fan-curve "$@" ;;
   tune)  shift; delegate xe-gpu-tune  "$@" ;;
   temps) shift; delegate xe-gpu-temps "$@" ;;
+  oc)    shift; delegate xe-gpu-oc    "$@" ;;
   -h|--help|help)
-    echo "usage: xe-gpu {status|watch [secs]|fan ...|tune ...|temps ...}"
+    echo "usage: xe-gpu {status|watch [secs]|fan ...|tune ...|temps ...|oc ...}"
     echo "  status        full dashboard (fan+clocks+power+temps)"
     echo "  watch [secs]  live dashboard"
-    echo "  fan|tune|temps <args>   run the matching helper" ;;
+    echo "  fan|tune|temps <args>   run the matching helper"
+    echo "  oc <args>     voltage-frequency curve OC (needs the xe_gt_oc patch)" ;;
   *) echo "unknown: $1 (try: xe-gpu help)"; exit 1;;
 esac

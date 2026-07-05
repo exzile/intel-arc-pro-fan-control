@@ -3,3 +3,4 @@
 *.ko
 *.o
 build/
+__pycache__/

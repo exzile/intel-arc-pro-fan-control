@@ -175,7 +175,8 @@ def tclass(c, crit):
 
 
 HELPER_PATHS = {"xe-fan-curve": "/usr/local/bin/xe-fan-curve",
-                "xe-gpu-tune": "/usr/local/bin/xe-gpu-tune"}
+                "xe-gpu-tune": "/usr/local/bin/xe-gpu-tune",
+                "xe-gpu-oc": "/usr/local/bin/xe-gpu-oc"}
 
 
 def run_priv(args, parent, after=None):
@@ -608,9 +609,21 @@ class Window(Adw.ApplicationWindow):
             self.profile_dd.connect("notify::selected", lambda *_: self._mark_tune())
             kv(g, 3, "Power profile", self.profile_dd,
                "Driver power profile: 'power_saving' trims idle draw; 'base' is the default.")
+        # voltage-frequency curve offset — only if the xe_gt_oc patch is present
+        self.sp_volt = None
+        self.volt_applied = 0
+        oc_node = os.path.join(self.gpu.card or "", "device/tile0/gt0/oc/vf_curve")
+        if os.path.exists(oc_node):
+            self.sp_volt = self._spin(-100, 100, 5, 0)
+            kv(g, 4, "Voltage offset (mV)", self.sp_volt,
+               "Shift the whole voltage-frequency curve. Negative = undervolt (cooler/efficient); "
+               "positive = more headroom for higher clocks.")
         c.append(g)
         self.tune_base = self._tune_vals()
-        for sp in (self.sp_pow, self.sp_min, self.sp_max):
+        spins = [self.sp_pow, self.sp_min, self.sp_max]
+        if self.sp_volt is not None:
+            spins.append(self.sp_volt)
+        for sp in spins:
             sp.connect("value-changed", lambda *_: self._mark_tune())
         btns = Gtk.Box(spacing=6, halign=Gtk.Align.END)
         btns.append(icon_button("edit-undo-symbolic", "Reset power & clocks to hardware defaults",
@@ -626,14 +639,20 @@ class Window(Adw.ApplicationWindow):
         if getattr(self, "profile_dd", None) is not None:
             it = self.profile_dd.get_selected_item()
             prof = it.get_string() if it else None
-        return (self.sp_pow.get_value(), self.sp_min.get_value(), self.sp_max.get_value(), prof)
+        volt = self.sp_volt.get_value() if getattr(self, "sp_volt", None) is not None else 0
+        return (self.sp_pow.get_value(), self.sp_min.get_value(), self.sp_max.get_value(), prof, volt)
 
     def _mark_tune(self):
         self.tune_apply.set_visible(self._tune_vals() != self.tune_base)
 
     def _reset_tune(self, *_):
-        run_priv(["xe-gpu-tune", "reset"], self, self._after_reset)
-        self.toast("Resetting power & clocks to hardware defaults…")
+        if getattr(self, "sp_volt", None) is not None and self.volt_applied != 0:
+            run_priv(["xe-gpu-oc", "reset"], self,
+                     lambda: run_priv(["xe-gpu-tune", "reset"], self, self._after_reset))
+            self.toast("Resetting power, clocks & voltage to defaults…")
+        else:
+            run_priv(["xe-gpu-tune", "reset"], self, self._after_reset)
+            self.toast("Resetting power & clocks to hardware defaults…")
 
     def _after_reset(self):
         self.refresh()
@@ -644,6 +663,9 @@ class Window(Adw.ApplicationWindow):
             self.sp_max.set_value(cl["max"])
         if pw.get("cap_w"):
             self.sp_pow.set_value(pw["cap_w"])
+        if getattr(self, "sp_volt", None) is not None:
+            self.sp_volt.set_value(0)
+        self.volt_applied = 0
         self.tune_base = self._tune_vals()
         self._mark_tune()
 
@@ -684,13 +706,28 @@ class Window(Adw.ApplicationWindow):
             args += ["--clk-max", str(int(cur[2]))]
         if len(cur) > 3 and cur[3] and cur[3] != self.tune_base[3]:
             args += ["--profile", cur[3]]
-        if len(args) == 2:      # nothing actually changed
+        tune_changed = len(args) > 2
+        # voltage offset -> xe-gpu-oc offset <delta from last-applied>
+        volt = cur[4] if len(cur) > 4 else 0
+        delta = int(volt) - int(self.volt_applied)
+        oc_args = ["xe-gpu-oc", "offset", str(delta)] if delta else None
+        if not tune_changed and not oc_args:
             return
-        run_priv(args, self, self.refresh)
+
+        def do_oc():
+            run_priv(oc_args, self, self.refresh)
+            self.volt_applied = int(volt)
+        if tune_changed:
+            run_priv(args, self, do_oc if oc_args else self.refresh)
+        elif oc_args:
+            do_oc()
         self.tune_base = cur
         self._mark_tune()
-        self.toast("Applying " + " ".join(args[2:]).replace("--power-w", "power")
-                   .replace("--clk-min", "min").replace("--clk-max", "max").replace("--profile", "profile"))
+        msg = " ".join(args[2:]).replace("--power-w", "power").replace(
+            "--clk-min", "min").replace("--clk-max", "max").replace("--profile", "profile")
+        if oc_args:
+            msg = (msg + " " if msg else "") + f"voltage {'+' if delta > 0 else ''}{delta}mV"
+        self.toast("Applying " + msg)
 
     def _tc(self, w, cls):
         for x in ("t-cool", "t-warm", "t-hot"):

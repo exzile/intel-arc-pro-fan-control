@@ -1,0 +1,109 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Joey Pongallo <joeypongallo@gmail.com>
+Date: Sun, 5 Jul 2026 02:40:00 -0400
+Subject: [PATCH] drm/xe: expose voltage-frequency curve overclocking via sysfs
+
+Battlemage discrete GPUs (e.g. Arc Pro B60/B70) expose an 85-point
+voltage-frequency (VF) curve through the PCODE "late-binding" interface.
+Each point is a frequency step whose value is the voltage (mV). The
+vendor driver programs this curve to implement the overclock / undervolt
+controls in its tuning UI, but xe never issues the sequence, so VF-curve
+tuning is unavailable on Linux even though the hardware and PCODE support
+it identically to Windows.
+
+Writing the curve is a bracketed PCODE transaction:
+
+    PCODE_MBOX(0x5f, 2, 0)             begin write session
+    PCODE_MBOX(0x5d, 0xa, 3) DATA0=P   write point P = (mV << 8 | index), x85
+    PCODE_MBOX(0x5d, 0xb, 3)           end / finalize
+
+A point is read with PCODE_MBOX(0x5d, 8, 3), DATA0=index -> DATA0=point.
+The begin command is the key: without it, the per-point write is rejected
+by PCODE (mailbox "illegal subcommand"). The LATE_BINDING capability
+(PCODE 0x5c) and the per-point reads are identical on Linux and Windows;
+only the begin/write/end transaction was missing.
+
+Add a small "oc" sysfs group under the root tile's primary GT with a
+read/write "vf_curve" attribute:
+
+    <device>/tile0/gt0/oc/vf_curve
+
+Reading emits one "<index> <voltage_mV>" line per point. Writing accepts
+one or more such lines; unlisted points keep their current value and the
+voltage is clamped to a conservative [400, 1200] mV window. The whole
+transaction runs under a runtime-PM reference so it works while the GPU
+is autosuspended.
+
+The transaction and packing were derived by tracing the vendor driver's
+PCODE mailbox activity (igdkmdnd64 fn issuing the mailbox writes) and
+confirmed by replaying it on an Arc Pro B60: reads match the vendor
+values, a written point reads back changed, and the curve restores
+cleanly with no instability.
+
+Signed-off-by: Joey Pongallo <joeypongallo@gmail.com>
+---
+ drivers/gpu/drm/xe/Makefile   |   1 +
+ drivers/gpu/drm/xe/xe_gt.c    |   5 ++
+ drivers/gpu/drm/xe/xe_gt_oc.c | 185 ++++++++++++++++++++++++++++++++++++++++++
+ drivers/gpu/drm/xe/xe_gt_oc.h |  13 +++
+ 4 files changed, 204 insertions(+)
+ create mode 100644 drivers/gpu/drm/xe/xe_gt_oc.c
+ create mode 100644 drivers/gpu/drm/xe/xe_gt_oc.h
+
+diff --git a/drivers/gpu/drm/xe/Makefile b/drivers/gpu/drm/xe/Makefile
+index 1111111..2222222 100644
+--- a/drivers/gpu/drm/xe/Makefile
++++ b/drivers/gpu/drm/xe/Makefile
+@@ -56,6 +56,7 @@ xe-y += \
+ 	xe_gt_clock.o \
+ 	xe_gt_freq.o \
++	xe_gt_oc.o \
+ 	xe_gt_idle.o \
+ 	xe_gt_mcr.o \
+diff --git a/drivers/gpu/drm/xe/xe_gt.c b/drivers/gpu/drm/xe/xe_gt.c
+index 3333333..4444444 100644
+--- a/drivers/gpu/drm/xe/xe_gt.c
++++ b/drivers/gpu/drm/xe/xe_gt.c
+@@ -29,6 +29,7 @@
+ #include "xe_gt_clock.h"
+ #include "xe_gt_freq.h"
++#include "xe_gt_oc.h"
+ #include "xe_gt_idle.h"
+@@ -697,6 +698,10 @@ int xe_gt_init(struct xe_gt *gt)
+ 	err = xe_gt_freq_init(gt);
+ 	if (err)
+ 		return err;
+
++	err = xe_gt_oc_init(gt);
++	if (err)
++		return err;
++
+ 	xe_force_wake_init_engines(gt, gt_to_fw(gt));
+diff --git a/drivers/gpu/drm/xe/xe_gt_oc.h b/drivers/gpu/drm/xe/xe_gt_oc.h
+new file mode 100644
+index 0000000..5555555
+--- /dev/null
++++ b/drivers/gpu/drm/xe/xe_gt_oc.h
+@@ -0,0 +1,13 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * Copyright © 2026 Intel Corporation
++ */
++
++#ifndef _XE_GT_OC_H_
++#define _XE_GT_OC_H_
++
++struct xe_gt;
++
++int xe_gt_oc_init(struct xe_gt *gt);
++
++#endif /* _XE_GT_OC_H_ */
+--
+2.43.0
+
+NOTE: xe_gt_oc.c is provided in full as xe_gt_oc.c in this directory (185
+lines). Regenerate this patch against the target tree with:
+  git add drivers/gpu/drm/xe/xe_gt_oc.c drivers/gpu/drm/xe/xe_gt_oc.h
+  git commit -s   # paste the message above
+  git format-patch -1
+so the hunk offsets match the destination kernel version.

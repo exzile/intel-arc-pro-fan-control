@@ -1,8 +1,14 @@
-# Intel Arc **Pro** Battlemage — Linux fan control & GPU tuning
+# Intel Arc **Pro** Battlemage — Linux fan control, GPU tuning & overclocking
 
-Working **custom fan curves**, **power/clock tuning**, and **kernel-update resilience** for the
-**Intel Arc Pro B60 / B70** (Battlemage) on Linux, where the stock `xe` driver exposes only
-read-only fan RPM.
+Working **custom fan curves**, **power/clock tuning**, **voltage-frequency-curve overclocking**,
+and **kernel-update resilience** for the **Intel Arc Pro B60 / B70** (Battlemage) on Linux, where
+the stock `xe` driver exposes only read-only fan RPM and no voltage control.
+
+> **Overclocking now works too.** The VF (voltage-frequency) curve — the one control Windows has
+> and stock `xe` lacks — is unlocked by a small `xe_gt_oc` patch that issues the PCODE *begin →
+> write → end* transaction the stock driver omits. Read/undervolt/overvolt the 85-point curve from
+> sysfs. It was never a fused-off Pro-SKU lock — just a missing driver transaction. See
+> **[docs/OVERCLOCKING.md](docs/OVERCLOCKING.md)**.
 
 > **Key finding:** the Arc **Pro** B60 (`8086:e211`) does **not** need the missing MEI late-bind
 > fan firmware for *manual* control. Intel's fan-control patch (series 168027) programs the user
@@ -21,6 +27,7 @@ Related upstream issue: [intel/compute-runtime #885](https://github.com/intel/co
 | Graphical fan-curve editor | — | ✅ built-in (`xe-gpu-gui`, draggable points) |
 | GPU power cap (TDP) | ✅ sysfs | ✅ + persistent helper |
 | GPU clock min/max limits | ✅ sysfs | ✅ + persistent helper |
+| **Voltage-frequency curve (undervolt/overclock)** | ❌ | ✅ `xe_gt_oc` patch + `xe-gpu oc` |
 | Idle power/heat optimization | ❌ (idles at 1200 MHz) | ✅ (idles at 400 MHz) |
 | All-sensor temp/health monitor | raw sysfs | ✅ `xe-gpu-temps` (table/watch/json) |
 | Single-command status dashboard | — | ✅ `xe-gpu` (fan+clocks+power+temps) |
@@ -38,6 +45,11 @@ Related upstream issue: [intel/compute-runtime #885](https://github.com/intel/co
   full-speed(0)/manual(1)/auto-stock(2).
 - **Power/clock tuning** uses only driver-exposed sysfs (`.../gt0/freq0/*`, hwmon `power1_cap`) —
   no patch, no PCODE poking, safe.
+- **Overclocking (VF curve)** is a separate, self-contained `xe_gt_oc` patch (`kernel/` +
+  `scripts/apply_xeoc.sh`) that adds `.../gt0/oc/vf_curve`. Writing the curve is a PCODE
+  transaction (`begin` `0x5f/2` → 85× point write `0x5d/0xa` → `end` `0x5d/0xb`); the stock
+  driver omits the `begin`, so the writes are rejected. Details + how it was derived:
+  [docs/OVERCLOCKING.md](docs/OVERCLOCKING.md).
 
 ## Quick start (Ubuntu / Debian-ish)
 
@@ -56,7 +68,11 @@ sudo install -m755 scripts/xe-fan-curve.sh  /usr/local/bin/xe-fan-curve
 sudo install -m755 scripts/xe-gpu-tune.sh   /usr/local/bin/xe-gpu-tune
 sudo install -m755 scripts/xe-gpu-temps.sh  /usr/local/bin/xe-gpu-temps
 sudo install -m755 scripts/xe-gpu.sh        /usr/local/bin/xe-gpu
+sudo install -m755 scripts/xe-gpu-oc.sh     /usr/local/bin/xe-gpu-oc      # overclocking CLI
 sudo install -m755 scripts/xe-fan-rebuild.sh /usr/local/sbin/xe-fan-rebuild
+
+# optional: unlock voltage-frequency-curve overclocking (adds .../gt0/oc/vf_curve)
+sudo bash scripts/apply_xeoc.sh && sudo reboot   # see docs/OVERCLOCKING.md
 sudo install -m755 kernel-hook/zz-xe-fan-rebuild /etc/kernel/postinst.d/zz-xe-fan-rebuild
 sudo cp systemd/etc/*.conf /etc/
 sudo cp systemd/*.service /etc/systemd/system/
@@ -90,6 +106,12 @@ sudo xe-fan-curve max         # full speed
 sudo xe-gpu-tune show
 sudo xe-gpu-tune set --power-w 150 --clk-max 2000 --clk-min 400
 sudo xe-gpu-tune reset
+
+# overclocking — voltage-frequency curve (needs the xe_gt_oc patch, see docs/OVERCLOCKING.md)
+sudo xe-gpu oc read            # dump the 85-point curve (index -> voltage mV)
+sudo xe-gpu oc offset -25      # undervolt every point 25 mV (cooler / more efficient)
+sudo xe-gpu oc set 60 980      # set a single point
+sudo xe-gpu oc reset           # restore the saved stock curve
 
 # temperatures / health (read-only, no patch needed)
 xe-gpu-temps            # table of every sensor + limits, fan, power
