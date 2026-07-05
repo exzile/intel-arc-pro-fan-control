@@ -12,9 +12,16 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 Launch **Arc GPU Dashboard** from your apps menu, or run `xe-gpu-gui`.
 
 ## Dashboard tab
-Live (2 s) readout of clocks (with a frequency bar), power cap + I1 crit, fan RPM/duty/mode, and every
-temperature sensor — the four mains (pkg / mctrl / pcie / vram) plus all VRAM channels, colour-coded by
-headroom to each sensor's crit limit, with a flame on the hottest. Controls:
+Live (2 s) metrics in a Windows-style panel of **metric tiles** — **Clock**, **Power draw**,
+**GPU temp**, and **Fan** — each with the big value, a sub-line (e.g. actual clock, throttle reason,
+power cap, fan %/mode), and a **live scrolling sparkline** of recent history. Power draw is derived
+from the GPU's energy counter, and the clock tile shows the throttle reason (thermal / pl1 / …) when
+it's throttling.
+
+Below that, a **scrollable Temperatures grid** shows every sensor — the four mains
+(pkg / mctrl / pcie / vram) plus all VRAM channels — colour-coded by headroom to each sensor's crit
+limit (a coloured left-border + value: **teal-green** cool, **amber** warm, **red** hot — the old
+hard-to-read blue is gone), with a flame on the hottest. Controls:
 
 - **Fan**: *Curve* (opens the editor), *Auto* (stock table), *Max* (full speed).
 - **Power cap, clock limits & power profile** live on the **Overclock tab** (all performance knobs
