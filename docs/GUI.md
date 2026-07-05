@@ -45,10 +45,18 @@ undervolted, accent-blue near stock, amber → red as you overvolt (the anchor n
 fill take the same colour). The voltage-offset label turns green (undervolt) or amber (overvolt),
 and the temp-limit label turns red when raised to 95 °C+.
 
-**Preset profiles** — the *Preset…* dropdown (top-right) loads a conservative profile into the
-sliders (offset mode): **Stock**, **Efficient** (−50 mV undervolt, cool/quiet, 85 °C cap),
-**Balanced** (−25 mV), **Performance** (+25 mV, 20 Gbps VRAM). Nothing is written until you press
-Apply, so a preset is a safe starting point you can then fine-tune.
+**Preset profiles** — the *Preset…* dropdown (in the Voltage curve panel) loads a conservative
+profile into the sliders (offset mode): **Stock**, **Efficient** (−50 mV undervolt, cool/quiet,
+85 °C cap), **Balanced** (−25 mV), **Performance** (+25 mV, 20 Gbps VRAM). Nothing is written until
+you press Apply, so a preset is a safe starting point you can then fine-tune.
+
+**Live telemetry** — the top strip shows the current **clock · temp · fan RPM**, refreshed every
+2 s, so you can watch the effect of an Apply (or a stability test) without leaving the tab.
+
+**Save/load your own profiles** — the top-right **Profile** dropdown plus **Save / Load / Delete**
+capture your tuned voltage/memory/temp settings under a name (`xe-gpu-oc profile …`, stored in
+`/var/lib/xe-gpu-oc/profiles`). Find a stable overclock, save it, and reload it any time — Load
+applies immediately.
 
 **Two adjustment modes** (the checkbox at the top switches between them):
 
@@ -75,11 +83,12 @@ accent highlight when it differs from what's on the card:
   (`xe-gpu-oc offset … / curve … / mem … / temp …`, `xe-gpu-tune …`); **Reset** restores stock
   curve + memory + temp; **Reload** re-reads from the GPU.
 - **Test** runs a **stability check**: a 60 s GPU load (`xe-gpu-stress`, vsync uncapped) while it
-  watches clocks + package temp and the kernel log for a GPU hang/reset. It reports **Stable**,
-  **Throttled** (peak hit your temp limit — stable but thermally capped), or **Unstable** (a hang
-  or crash under load) — and on Unstable it **auto-reverts to stock**. Needs a workload installed
-  (`sudo apt install glmark2` — or `vkmark`; `glxgears` works as a light fallback). Verify a new
-  overclock with this before you rely on it.
+  watches clocks + package temp and the kernel log for a GPU hang/reset. It **ramps the fan to max
+  for the test and restores it after** (a safety margin), so it asks for authorization once. It
+  reports **Stable**, **Throttled** (peak hit your temp limit — stable but thermally capped), or
+  **Unstable** (a hang or crash under load) — and on Unstable it **auto-reverts to stock**. Needs a
+  workload installed (`sudo apt install glmark2` — or `vkmark`; `glxgears` is a light fallback).
+  Verify a new overclock with this before you rely on it.
 - Voltage is clamped to a safe 400–1200 mV. The curve is kept **monotonic** (voltage rises with
   frequency) to match what PCODE will accept — dragging a node below its neighbour pins it up rather
   than silently failing, and the top points sit on the fixed Vmax rail. So the preview is exactly

@@ -672,6 +672,28 @@ class VoltageCurveView(Gtk.Box):
         self._drag = None
         self._loading = True
 
+        # ===== top strip: live telemetry (left) + profile manager (right) =====
+        top = Gtk.Box(spacing=8); top.add_css_class("mode-row")
+        ti = Gtk.Image(icon_name="utilities-system-monitor-symbolic"); ti.add_css_class("field-icon")
+        top.append(ti)
+        self.telemetry = Gtk.Label(xalign=0, hexpand=True); self.telemetry.add_css_class("dim")
+        self.telemetry.set_markup("<span alpha='55%'>reading live stats…</span>")
+        top.append(self.telemetry)
+        plbl = Gtk.Label(label="Profile"); plbl.add_css_class("field-label")
+        top.append(plbl)
+        top.append(info_icon("Save the current voltage/memory/temp settings as a named profile, "
+                             "then load or delete saved ones. Loading applies immediately."))
+        self.prof_names = []
+        self.prof_dd = Gtk.DropDown.new_from_strings(["(none saved)"])
+        self.prof_dd.set_sensitive(False)
+        top.append(self.prof_dd)
+        top.append(icon_button("list-add-symbolic", "Save the current settings as a new profile",
+                               self._prof_save, label="Save"))
+        top.append(icon_button("document-open-symbolic", "Load the selected profile",
+                               self._prof_load, label="Load"))
+        top.append(icon_button("user-trash-symbolic", "Delete the selected profile", self._prof_delete))
+        self.append(top)
+
         # ===== two-column body: voltage (left) · power / memory / thermal (right) =====
         body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -876,6 +898,74 @@ class VoltageCurveView(Gtk.Box):
     def _on_knob(self):
         self._hint(); self.area.queue_draw(); self._mark()
 
+    # ---- live telemetry (fed by the window's 2s refresh) ----
+    def set_telemetry(self, mhz, temp_c, rpm):
+        parts = []
+        if mhz is not None:
+            parts.append(f"{mhz} MHz")
+        if temp_c is not None:
+            parts.append(f"{temp_c}°C")
+        if rpm is not None:
+            parts.append(f"{rpm} rpm")
+        self.telemetry.set_markup("  ·  ".join(f"<b>{p}</b>" for p in parts) if parts else "—")
+
+    # ---- profiles ----
+    def _prof_refresh(self):
+        def work():
+            try:
+                out = subprocess.run([HELPER_PATHS["xe-gpu-oc"], "profile", "names"],
+                                     capture_output=True, text=True, timeout=5).stdout
+            except Exception:
+                out = ""
+            names = [l.strip() for l in out.splitlines() if l.strip()]
+            GLib.idle_add(self._prof_set, names)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _prof_set(self, names):
+        self.prof_names = names
+        self.prof_dd.set_model(Gtk.StringList.new(names if names else ["(none saved)"]))
+        self.prof_dd.set_sensitive(bool(names))
+        return False
+
+    def _prof_selected(self):
+        if not self.prof_names:
+            return None
+        i = self.prof_dd.get_selected()
+        return self.prof_names[i] if 0 <= i < len(self.prof_names) else None
+
+    def _prof_save(self, *_):
+        dlg = Adw.MessageDialog(transient_for=self.window, heading="Save profile",
+                                body="Name this overclock profile (voltage / memory / temp):")
+        entry = Gtk.Entry(placeholder_text="e.g. daily, gaming, quiet", activates_default=True)
+        dlg.set_extra_child(entry)
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("save", "Save")
+        dlg.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_default_response("save"); dlg.set_close_response("cancel")
+
+        def on_resp(d, resp):
+            name = entry.get_text().strip()
+            if resp == "save" and name:
+                run_priv(["xe-gpu-oc", "profile", "save", name], self.window,
+                         lambda: (self._prof_refresh(), self.window.toast(f"Saved profile “{name}”")))
+        dlg.connect("response", on_resp)
+        dlg.present()
+
+    def _prof_load(self, *_):
+        name = self._prof_selected()
+        if not name:
+            self.window.toast("No profile selected"); return
+        run_priv(["xe-gpu-oc", "profile", "load", name], self.window,
+                 lambda: (setattr(self, "applied", 0), setattr(self, "applied_curve", None),
+                          self._load(), self.window.toast(f"Loaded profile “{name}”")))
+
+    def _prof_delete(self, *_):
+        name = self._prof_selected()
+        if not name:
+            self.window.toast("No profile selected"); return
+        run_priv(["xe-gpu-oc", "profile", "delete", name], self.window,
+                 lambda: (self._prof_refresh(), self.window.toast(f"Deleted profile “{name}”")))
+
     # ---- data ----
     def _load(self, *_):
         self._loading = True
@@ -930,6 +1020,7 @@ class VoltageCurveView(Gtk.Box):
             if prof and prof.get("current") in opts:
                 self.prof_applied = prof["current"]
                 self.profile_dd.set_selected(opts.index(prof["current"]))
+        self._prof_refresh()
         self._hint(); self.area.queue_draw(); self._mark()
         return False
 
@@ -1123,13 +1214,20 @@ class VoltageCurveView(Gtk.Box):
         self._testing = True
         self.test_btn.set_sensitive(False); self.apply_btn.set_sensitive(False)
         self.hint.set_text("stability test starting…")
-        self.window.toast(f"Stability test: {STRESS_SECS}s GPU load…")
+        self.window.toast(f"Stability test: {STRESS_SECS}s GPU load (fan → max)…")
+        # run via pkexec with --fan-guard: root ramps the fan to max + restores it, and
+        # runs the workload as us (passing our session env so it can open the display).
+        env = os.environ
+        cmd = ["pkexec", HELPER_PATHS["xe-gpu-stress"], str(STRESS_SECS), "--fan-guard",
+               "--user", env.get("USER") or env.get("LOGNAME") or "",
+               "--display", env.get("DISPLAY", ""),
+               "--wayland", env.get("WAYLAND_DISPLAY", ""),
+               "--runtime", env.get("XDG_RUNTIME_DIR", "")]
 
         def work():
             summary = {}
             try:
-                p = subprocess.Popen([HELPER_PATHS["xe-gpu-stress"], str(STRESS_SECS)],
-                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
             except OSError as e:
                 GLib.idle_add(self._stress_done, {"STATUS": "error", "_err": str(e)}); return
             for line in p.stdout:
@@ -1141,6 +1239,8 @@ class VoltageCurveView(Gtk.Box):
                 elif "=" in line:
                     k, v = line.split("=", 1); summary[k] = v
             p.wait()
+            if p.returncode == 126 and "STATUS" not in summary:   # pkexec auth dismissed
+                summary["STATUS"] = "cancelled"
             GLib.idle_add(self._stress_done, summary)
         threading.Thread(target=work, daemon=True).start()
 
@@ -1155,6 +1255,8 @@ class VoltageCurveView(Gtk.Box):
         mt, mnf, mxf = s.get("MAXTEMP", "?"), s.get("MINFREQ", "?"), s.get("MAXFREQ", "?")
         if st == "no_workload":
             self.window.toast("Install glmark2 or vkmark to run a stability test", ms=4000)
+        elif st == "cancelled":
+            self.window.toast("Stability test cancelled")
         elif st == "error":
             self.window.toast("Stability test could not start")
         elif st == "unstable":
@@ -1539,6 +1641,9 @@ class Window(Adw.ApplicationWindow):
             self.tcache[t["label"]] = t["c"]
         if "pkg" in mains:
             self.editor.cur_pkg = mains["pkg"]["c"]
+        if getattr(self, "oc_view", None) is not None:
+            self.oc_view.set_telemetry(cl.get("cur"),
+                                       mains.get("pkg", {}).get("c"), fn.get("rpm"))
         hottest = max(self.tcache.values(), default=None)
         for name, (cell, val, bar) in self.main_t.items():
             t = mains.get(name)

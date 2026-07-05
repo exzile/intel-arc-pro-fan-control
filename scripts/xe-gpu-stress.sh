@@ -1,18 +1,44 @@
 #!/usr/bin/env bash
 # xe-gpu-stress.sh - short GPU load + telemetry watch to validate an overclock.
 #
-# Unprivileged. Runs a GL/Vulkan workload for N seconds while sampling GPU clock and
-# package temperature, then flags INSTABILITY (a GPU hang/reset, or the workload
-# crashing under load) and THROTTLING (peak temp reaching the throttle limit).
-# Emits per-second "PROGRESS <sec> <mhz> <tempC>" lines and a machine-readable
-# summary (STATUS=ok|throttled|unstable|no_workload, plus MAXTEMP/MINFREQ/...).
-# Exit: 0 stable/throttled, 2 unstable, 3 no workload available, 64 usage.
+# Runs a GL/Vulkan workload for N seconds while sampling GPU clock and package
+# temperature, then flags INSTABILITY (a GPU hang/reset, or the workload crashing
+# under load) and THROTTLING (peak temp reaching the throttle limit). Emits
+# per-second "PROGRESS <sec> <mhz> <tempC>" lines and a machine-readable summary
+# (STATUS=ok|throttled|unstable|no_workload, plus MAXTEMP/MINFREQ/...).
+#
+# Usage: xe-gpu-stress <seconds> [--fan-guard --user <u> --display <d>
+#                                 --wayland <w> --runtime <dir>]
+# Plain (unprivileged) runs the workload directly. With --fan-guard (run as root,
+# e.g. via pkexec) it ramps the fan to MAX for the duration and restores it after,
+# launching the workload as <user> with the passed session env so it can open the
+# display. Exit: 0 stable/throttled, 2 unstable, 3 no workload, 64 usage.
 set -uo pipefail
 
 SECS="${1:-60}"
-[[ "$SECS" =~ ^[0-9]+$ ]] || { echo "usage: xe-gpu-stress <seconds>"; exit 64; }
+[[ "$SECS" =~ ^[0-9]+$ ]] || { echo "usage: xe-gpu-stress <seconds> [--fan-guard ...]"; exit 64; }
+shift || true
+RUNUSER=""; DISP=""; WLD=""; XRD=""; FANGUARD=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --fan-guard) FANGUARD=1; shift ;;
+    --user)      RUNUSER="${2:-}"; shift 2 ;;
+    --display)   DISP="${2:-}"; shift 2 ;;
+    --wayland)   WLD="${2:-}"; shift 2 ;;
+    --runtime)   XRD="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
 
-GPU="${ARC_GPU_BDF:-0000:03:00.0}"
+_detect_bdf(){   # find the Arc (xe) GPU's PCI address (override with ARC_GPU_BDF)
+  local d drv
+  for d in /sys/class/drm/card*/device; do
+    drv=$(basename "$(readlink -f "$d/driver" 2>/dev/null)" 2>/dev/null)
+    [ "$drv" = xe ] && { basename "$(readlink -f "$d")"; return 0; }
+  done
+  return 1
+}
+GPU="${ARC_GPU_BDF:-$(_detect_bdf || echo 0000:03:00.0)}"
 DEV="/sys/bus/pci/devices/$GPU"
 FREQ="$DEV/tile0/gt0/freq0/cur_freq"
 TL="$DEV/tile0/gt0/oc/temp_limit"
@@ -31,6 +57,21 @@ pkg_temp_mC(){   # package temp in millidegrees C (0 if unavailable)
   done
   echo 0
 }
+
+# fan guard: ramp to full speed during the test, restore the prior mode after.
+# Needs root + the hwmon pwm1_enable node (0=full, 1=manual curve, 2=auto).
+FANPREV=""
+fan_max_on(){
+  [ "$FANGUARD" = 1 ] && [ "$(id -u)" -eq 0 ] || return 0
+  [ -n "$HW" ] && [ -w "$HW/pwm1_enable" ] || return 0
+  FANPREV=$(cat "$HW/pwm1_enable" 2>/dev/null)
+  echo 0 > "$HW/pwm1_enable" 2>/dev/null && echo "FAN=max"
+}
+fan_restore(){
+  [ -n "$FANPREV" ] && [ -n "$HW" ] && [ -w "$HW/pwm1_enable" ] || return 0
+  echo "$FANPREV" > "$HW/pwm1_enable" 2>/dev/null
+}
+trap fan_restore EXIT
 
 # choose a display workload (first available)
 WL=""; WLNAME=""
@@ -53,9 +94,19 @@ hang_count(){
 }
 BASE=$(hang_count)
 
+# ramp the fan to max for the test (restored on exit via the trap)
+fan_max_on
+
 # launch the workload in its own session (so we can kill it + children), with vsync
-# uncapped (vblank_mode=0) so it actually loads the GPU rather than idling at 60 fps
-setsid env vblank_mode=0 __GL_SYNC_TO_VBLANK=0 $WL >/dev/null 2>&1 &
+# uncapped (vblank_mode=0) so it actually loads the GPU rather than idling at 60 fps.
+# Under --fan-guard we run as root, so drop to the target user (with their session
+# env) to open the display; otherwise run the workload directly.
+if [ "$FANGUARD" = 1 ] && [ "$(id -u)" -eq 0 ] && [ -n "$RUNUSER" ]; then
+  setsid runuser -u "$RUNUSER" -- env DISPLAY="$DISP" WAYLAND_DISPLAY="$WLD" \
+    XDG_RUNTIME_DIR="$XRD" vblank_mode=0 __GL_SYNC_TO_VBLANK=0 $WL >/dev/null 2>&1 &
+else
+  setsid env vblank_mode=0 __GL_SYNC_TO_VBLANK=0 $WL >/dev/null 2>&1 &
+fi
 PID=$!
 sleep 1
 

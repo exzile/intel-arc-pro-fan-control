@@ -9,7 +9,16 @@
 # to /etc/xe-gpu-oc.conf and re-applied at boot by xe-gpu-oc.service (`... boot`).
 set -euo pipefail
 
-GPU="${ARC_GPU_BDF:-0000:03:00.0}"
+# locate the Arc (xe) GPU's PCI address: explicit override, else auto-detect, else legacy default
+_detect_bdf(){
+  local d drv
+  for d in /sys/class/drm/card*/device; do
+    drv=$(basename "$(readlink -f "$d/driver" 2>/dev/null)" 2>/dev/null)
+    [ "$drv" = xe ] && { basename "$(readlink -f "$d")"; return 0; }
+  done
+  return 1
+}
+GPU="${ARC_GPU_BDF:-$(_detect_bdf || echo 0000:03:00.0)}"
 DEV="/sys/bus/pci/devices/$GPU"
 OC="$DEV/tile0/gt0/oc/vf_curve"
 MS="$DEV/tile0/gt0/oc/mem_speed"
@@ -27,6 +36,7 @@ STOCKDIR=/var/lib/xe-gpu-oc
 STOCK="$STOCKDIR/stock-curve"
 APPLIED="$STOCKDIR/applied-curve"
 CONF=/etc/xe-gpu-oc.conf
+PROFDIR="$STOCKDIR/profiles"     # saved named OC profiles (voltage/memory/temp)
 
 die(){ echo "xe-gpu-oc: $*" >&2; exit 1; }
 need_root(){ [ "$(id -u)" -eq 0 ] || die "must run as root (sudo)"; }
@@ -154,6 +164,67 @@ cmd_boot(){ # re-apply persisted choices (xe-gpu-oc.service)
   echo "boot: done"
 }
 
+prof_name_ok(){ [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || die "profile name: letters, digits, . _ - only"; }
+
+cmd_profile(){ # save|load|list|names|delete a named OC profile (voltage/memory/temp)
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    list)
+      [ -d "$PROFDIR" ] || { echo "(no saved profiles)"; return 0; }
+      local f found=0 n
+      for f in "$PROFDIR"/*.conf; do
+        [ -e "$f" ] || continue; found=1; n=$(basename "$f" .conf)
+        ( . "$f" 2>/dev/null
+          printf "%-16s offset=%-7s max=%-5s mem=%-6s temp=%s\n" "$n" \
+            "${VOLTAGE_OFFSET:-0}" "${VOLTAGE_MAX:-$VMAX}" "${MEM_SPEED:-$MEM_STOCK}" "${TEMP_LIMIT:-$TEMP_STOCK}" )
+      done
+      [ "$found" = 1 ] || echo "(no saved profiles)"
+      ;;
+    names)   # bare names, one per line (for the GUI)
+      [ -d "$PROFDIR" ] || return 0
+      local f; for f in "$PROFDIR"/*.conf; do [ -e "$f" ] && basename "$f" .conf; done
+      ;;
+    save)
+      need_root; local name="${1:?profile name required}"; prof_name_ok "$name"
+      [ -r "$CONF" ] || die "nothing applied yet to save (apply an OC first)"
+      mkdir -p "$PROFDIR"
+      local VOLTAGE_OFFSET VOLTAGE_MAX MEM_SPEED TEMP_LIMIT
+      . "$CONF" 2>/dev/null || true
+      { echo "VOLTAGE_OFFSET=${VOLTAGE_OFFSET:-0}"
+        echo "VOLTAGE_MAX=${VOLTAGE_MAX:-$VMAX}"
+        echo "MEM_SPEED=${MEM_SPEED:-$MEM_STOCK}"
+        echo "TEMP_LIMIT=${TEMP_LIMIT:-$TEMP_STOCK}"; } > "$PROFDIR/$name.conf"
+      if [ "${VOLTAGE_OFFSET:-0}" = custom ] && [ -f "$APPLIED" ]; then
+        cp "$APPLIED" "$PROFDIR/$name.curve"        # preserve a per-point custom curve
+      else
+        rm -f "$PROFDIR/$name.curve"
+      fi
+      echo "saved profile '$name'."
+      ;;
+    load)
+      need_root; local name="${1:?profile name required}"; prof_name_ok "$name"
+      local pf="$PROFDIR/$name.conf"; [ -r "$pf" ] || die "no such profile '$name'"
+      local VOLTAGE_OFFSET VOLTAGE_MAX MEM_SPEED TEMP_LIMIT
+      . "$pf"
+      wake; have_oc; save_stock
+      if [ "${VOLTAGE_OFFSET:-0}" = custom ] && [ -f "$PROFDIR/$name.curve" ]; then
+        cat "$PROFDIR/$name.curve" > "$OC"; read_curve > "$APPLIED"; persist_kv VOLTAGE_OFFSET custom
+      else
+        apply_offset "${VOLTAGE_OFFSET:-0}" "${VOLTAGE_MAX:-$VMAX}"; rm -f "$APPLIED"
+        persist_kv VOLTAGE_OFFSET "${VOLTAGE_OFFSET:-0}"; persist_kv VOLTAGE_MAX "${VOLTAGE_MAX:-$VMAX}"
+      fi
+      if [ -e "$MS" ]; then echo "${MEM_SPEED:-$MEM_STOCK}" > "$MS"; persist_kv MEM_SPEED "${MEM_SPEED:-$MEM_STOCK}"; fi
+      if [ -e "$TL" ]; then echo "${TEMP_LIMIT:-$TEMP_STOCK}" > "$TL"; persist_kv TEMP_LIMIT "${TEMP_LIMIT:-$TEMP_STOCK}"; fi
+      echo "loaded profile '$name'."
+      ;;
+    delete|rm)
+      need_root; local name="${1:?profile name required}"; prof_name_ok "$name"
+      rm -f "$PROFDIR/$name.conf" "$PROFDIR/$name.curve"; echo "deleted profile '$name'."
+      ;;
+    *) die "profile: save|load|list|names|delete <name>" ;;
+  esac
+}
+
 cmd_status(){
   echo "offset=$(conf_get VOLTAGE_OFFSET)"
   echo "mem_speed=$(conf_get MEM_SPEED)"
@@ -174,6 +245,9 @@ xe-gpu-oc.sh - Arc Pro B60/B70 overclocking (Linux)
   mem <Mbps>        set VRAM (GDDR6) memory speed, e.g. 'mem 20000' = 20 Gbps
   temp <degC>       set the GPU temperature (throttle) limit, e.g. 'temp 95'
   reset             restore stock curve + memory speed + temp limit
+  profile save <n>  save the current OC (voltage/memory/temp) as a named profile
+  profile load <n>  apply a saved profile
+  profile list      list saved profiles; 'profile delete <n>' removes one
   boot              re-apply persisted choices (used by xe-gpu-oc.service)
   status            print persisted offset + memory speed + temp limit
 
@@ -190,6 +264,7 @@ case "${1:-}" in
   mem)    cmd_mem "${2:?Mbps required}" ;;
   temp)   cmd_temp "${2:?degC required}" ;;
   reset)  cmd_reset ;;
+  profile) shift; cmd_profile "$@" ;;
   boot)   cmd_boot ;;
   status) cmd_status ;;
   ""|-h|--help|help) usage ;;
