@@ -200,6 +200,16 @@ class XeGpu:
     def read_mem_speed(self):
         return _int(self.mem_node())   # Mbps, or None
 
+    def temp_node(self):
+        return os.path.join(self.card or "_", "device/tile0/gt0/oc/temp_limit")
+
+    @property
+    def temp_available(self):
+        return os.path.exists(self.temp_node())
+
+    def read_temp_limit(self):
+        return _int(self.temp_node())  # degC, or None
+
 
 PRESETS = {
     "Silent":     [[40, 0], [55, 45], [70, 100], [82, 170], [90, 255]],
@@ -599,6 +609,25 @@ class VoltageCurveView(Gtk.Box):
             mrow.append(Gtk.Label(label="Gbps"))
             self.append(mrow)
 
+        # GPU temperature (throttle) limit
+        self.temp_spin = None
+        self.temp_applied = 100
+        if self.gpu.temp_available:
+            trow = Gtk.Box(spacing=10)
+            tlab = Gtk.Label(label="Temp limit", xalign=0); tlab.add_css_class("section")
+            trow.append(tlab)
+            self.temp_spin = Gtk.SpinButton(
+                adjustment=Gtk.Adjustment(lower=60, upper=100, step_increment=1, value=100),
+                valign=Gtk.Align.CENTER)
+            self.temp_spin.set_numeric(True)
+            self.temp_spin.set_tooltip_text("GPU thermal-throttle target (°C). Higher = the GPU runs "
+                                            "hotter before throttling (more sustained clock); lower = "
+                                            "cooler/quieter.")
+            self.temp_spin.connect("value-changed", lambda *_: self._mark())
+            trow.append(self.temp_spin)
+            trow.append(Gtk.Label(label="°C"))
+            self.append(trow)
+
         bar = Gtk.Box(spacing=8)
         self.hint = Gtk.Label(xalign=0, hexpand=True); self.hint.add_css_class("dim")
         bar.append(self.hint)
@@ -648,6 +677,11 @@ class VoltageCurveView(Gtk.Box):
             if mbps:
                 self.mem_applied = mbps
                 self.mem_spin.set_value(mbps / 1000.0)
+        if self.temp_spin is not None:
+            degc = self.gpu.read_temp_limit()
+            if degc:
+                self.temp_applied = degc
+                self.temp_spin.set_value(degc)
         self._hint(); self.area.queue_draw(); self._mark()
         return False
 
@@ -665,6 +699,8 @@ class VoltageCurveView(Gtk.Box):
         changed = int(self.offset) != int(self.applied)
         if self.mem_spin is not None:
             changed = changed or int(self.mem_spin.get_value() * 1000) != int(self.mem_applied)
+        if self.temp_spin is not None:
+            changed = changed or int(self.temp_spin.get_value()) != int(self.temp_applied)
         self.apply_btn.set_visible(changed)
 
     def _on_slide(self, *_):
@@ -672,39 +708,44 @@ class VoltageCurveView(Gtk.Box):
         self._hint(); self.area.queue_draw(); self._mark()
 
     def _apply(self, *_):
+        # build a queue of (args, on_success, label) for each changed knob, then
+        # run them sequentially (each is a persisted xe-gpu-oc call)
         want = int(self.offset)
-        off_changed = want != int(self.applied)
-        want_mbps = int(self.mem_spin.get_value() * 1000) if self.mem_spin is not None else None
-        mem_changed = want_mbps is not None and want_mbps != int(self.mem_applied)
-        if not off_changed and not mem_changed:
+        queue = []
+        if want != int(self.applied):
+            queue.append((["xe-gpu-oc", "offset", str(want)],
+                          lambda: (setattr(self, "applied", want), self._hint()),
+                          f"voltage {'+' if want > 0 else ''}{want} mV"))
+        if self.mem_spin is not None:
+            wm = int(self.mem_spin.get_value() * 1000)
+            if wm != int(self.mem_applied):
+                queue.append((["xe-gpu-oc", "mem", str(wm)],
+                              lambda wm=wm: setattr(self, "mem_applied", wm),
+                              f"memory {wm / 1000:.2f} Gbps"))
+        if self.temp_spin is not None:
+            wt = int(self.temp_spin.get_value())
+            if wt != int(self.temp_applied):
+                queue.append((["xe-gpu-oc", "temp", str(wt)],
+                              lambda wt=wt: setattr(self, "temp_applied", wt),
+                              f"temp {wt}°C"))
+        if not queue:
             return
 
-        def apply_mem():
-            run_priv(["xe-gpu-oc", "mem", str(want_mbps)], self.window,
-                     lambda: (setattr(self, "mem_applied", want_mbps), self._mark()))
-
-        if off_changed and mem_changed:      # offset first, then memory (chained)
-            run_priv(["xe-gpu-oc", "offset", str(want)], self.window,
-                     lambda: (setattr(self, "applied", want), self._hint(), apply_mem()))
-        elif off_changed:
-            run_priv(["xe-gpu-oc", "offset", str(want)], self.window,
-                     lambda: (setattr(self, "applied", want), self._hint(), self._mark()))
-        elif mem_changed:
-            apply_mem()
-
-        parts = []
-        if off_changed:
-            parts.append(f"voltage {'+' if want > 0 else ''}{want} mV")
-        if mem_changed:
-            parts.append(f"memory {want_mbps / 1000:.2f} Gbps")
-        self.window.toast("Applying " + ", ".join(parts) + " (saved)…")
+        def run_next(i):
+            if i >= len(queue):
+                self._mark()
+                return
+            args, on_ok, _ = queue[i]
+            run_priv(args, self.window, lambda: (on_ok(), run_next(i + 1)))
+        run_next(0)
+        self.window.toast("Applying " + ", ".join(q[2] for q in queue) + " (saved)…")
 
     def _reset(self, *_):
         def ok():
             self.applied = 0
-            self._load()          # re-reads curve, persisted offset, and memory speed
+            self._load()          # re-reads curve, offset, memory speed, temp limit
         run_priv(["xe-gpu-oc", "reset"], self.window, ok)
-        self.window.toast("Restoring stock voltage curve + memory speed…")
+        self.window.toast("Restoring stock voltage curve + memory speed + temp limit…")
 
     # ---- drawing ----
     def _draw(self, area, cr, w, h, *_):

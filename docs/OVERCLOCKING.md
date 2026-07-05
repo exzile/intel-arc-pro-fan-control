@@ -53,8 +53,14 @@ sudo xe-gpu oc offset -25        # undervolt every point by 25 mV
 sudo xe-gpu oc offset 30         # overvolt (headroom for higher clocks)
 sudo xe-gpu oc set 60 980        # set one point (index 60) to 980 mV
 sudo xe-gpu oc mem 20000         # set VRAM (GDDR6) memory speed to 20 Gbps (Mbps)
-sudo xe-gpu oc reset             # restore the stock curve + memory speed
+sudo xe-gpu oc temp 95           # set the GPU temperature (throttle) limit to 95 °C
+sudo xe-gpu oc reset             # restore the stock curve + memory speed + temp limit
 ```
+
+The **temperature limit** (`.../gt0/oc/temp_limit`, °C, clamped 60–100) is the GPU's
+thermal-throttle target — raise it to let the card run hotter before throttling (more
+sustained clock under load), or lower it to keep it cooler/quieter. Same PCODE
+mechanism as memory speed (LATE_BINDING domain `0x49`). Persisted + re-applied at boot.
 
 ### VRAM memory speed
 

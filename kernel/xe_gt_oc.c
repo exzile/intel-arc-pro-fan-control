@@ -27,6 +27,10 @@
  *   LATE_BINDING domain 0x17: write (0x5e,6,0x17) d0=Mbps then commit
  *   (0x5e,8,0x17); read (0x5e,5,0x17). Clamped to [OC_MEM_MIN_MBPS,
  *   OC_MEM_MAX_MBPS]. Reads report the stock speed until a value is staged.
+ *
+ * sysfs: <device>/tile#/gt#/oc/temp_limit  (read/write)
+ *   GPU thermal-throttle target in degrees C. Same LATE_BINDING mechanism,
+ *   domain 0x49. Clamped to [OC_TEMP_MIN_C, OC_TEMP_MAX_C].
  */
 
 #include <linux/cleanup.h>
@@ -64,6 +68,17 @@
 #define OC_MEM_MIN_MBPS		14000
 #define OC_MEM_MAX_MBPS		24000
 #define OC_MEM_STOCK_MBPS	19000	/* B60/B70 GDDR6 default (2375 MHz x8); reported before anything is staged */
+
+/* GPU temperature limit (thermal throttle target), in degrees C, via
+ * LATE_BINDING domain 0x49: read (0x5e,5,0x49), set (0x5e,6,0x49) d0=degC,
+ * commit (0x5e,8,0x49). */
+#define OC_TEMP_DOMAIN		0x49
+#define OC_MBOX_TEMP_READ	PCODE_MBOX(0x5e, 0x5, OC_TEMP_DOMAIN)
+#define OC_MBOX_TEMP_SET	PCODE_MBOX(0x5e, 0x6, OC_TEMP_DOMAIN)
+#define OC_MBOX_TEMP_COMMIT	PCODE_MBOX(0x5e, 0x8, OC_TEMP_DOMAIN)
+#define OC_TEMP_MIN_C		60
+#define OC_TEMP_MAX_C		100
+#define OC_TEMP_STOCK_C		100	/* default throttle target */
 
 static struct xe_device *oc_kobj_to_xe(struct kobject *kobj)
 {
@@ -195,12 +210,55 @@ static ssize_t mem_speed_store(struct kobject *kobj, struct kobj_attribute *attr
 	return count;
 }
 
+static ssize_t temp_limit_show(struct kobject *kobj, struct kobj_attribute *attr,
+			       char *buf)
+{
+	struct xe_device *xe = oc_kobj_to_xe(kobj);
+	struct xe_tile *tile = xe_device_get_root_tile(xe);
+	u32 degc = 0, hi = 0;
+	int ret;
+
+	guard(xe_pm_runtime)(xe);
+
+	ret = xe_pcode_read(tile, OC_MBOX_TEMP_READ, &degc, &hi);
+	if (ret)
+		degc = OC_TEMP_STOCK_C;
+
+	return sysfs_emit(buf, "%u\n", degc);
+}
+
+static ssize_t temp_limit_store(struct kobject *kobj, struct kobj_attribute *attr,
+				const char *buf, size_t count)
+{
+	struct xe_device *xe = oc_kobj_to_xe(kobj);
+	struct xe_tile *tile = xe_device_get_root_tile(xe);
+	u32 degc, c0 = 0, c1 = 0;
+	int ret;
+
+	ret = kstrtou32(buf, 0, &degc);
+	if (ret)
+		return ret;
+	if (degc < OC_TEMP_MIN_C || degc > OC_TEMP_MAX_C)
+		return -EINVAL;
+
+	guard(xe_pm_runtime)(xe);
+
+	ret = xe_pcode_write64_timeout(tile, OC_MBOX_TEMP_SET, degc, 0, 1);
+	if (ret)
+		return ret;
+	xe_pcode_read(tile, OC_MBOX_TEMP_COMMIT, &c0, &c1);   /* commit / finalize */
+
+	return count;
+}
+
 static struct kobj_attribute attr_vf_curve = __ATTR_RW(vf_curve);
 static struct kobj_attribute attr_mem_speed = __ATTR_RW(mem_speed);
+static struct kobj_attribute attr_temp_limit = __ATTR_RW(temp_limit);
 
 static const struct attribute *oc_attrs[] = {
 	&attr_vf_curve.attr,
 	&attr_mem_speed.attr,
+	&attr_temp_limit.attr,
 	NULL,
 };
 

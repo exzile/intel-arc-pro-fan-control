@@ -13,12 +13,16 @@ GPU="${ARC_GPU_BDF:-0000:03:00.0}"
 DEV="/sys/bus/pci/devices/$GPU"
 OC="$DEV/tile0/gt0/oc/vf_curve"
 MS="$DEV/tile0/gt0/oc/mem_speed"
+TL="$DEV/tile0/gt0/oc/temp_limit"
 NPTS=85
 VMIN=400
 VMAX=1200
 MEM_MIN=14000
 MEM_MAX=24000
 MEM_STOCK=19000
+TEMP_MIN=60
+TEMP_MAX=100
+TEMP_STOCK=100
 STOCKDIR=/var/lib/xe-gpu-oc
 STOCK="$STOCKDIR/stock-curve"
 APPLIED="$STOCKDIR/applied-curve"
@@ -28,6 +32,7 @@ die(){ echo "xe-gpu-oc: $*" >&2; exit 1; }
 need_root(){ [ "$(id -u)" -eq 0 ] || die "must run as root (sudo)"; }
 have_oc(){ [ -e "$OC" ] || die "OC interface not found ($OC) - xe_gt_oc patch not loaded?"; }
 have_mem(){ [ -e "$MS" ] || die "mem_speed interface not found ($MS) - update the xe_gt_oc patch"; }
+have_temp(){ [ -e "$TL" ] || die "temp_limit interface not found ($TL) - update the xe_gt_oc patch"; }
 wake(){ echo on > "$DEV/power/control" 2>/dev/null || true; }
 
 read_curve(){ cat "$OC"; }
@@ -54,7 +59,10 @@ cmd_read(){
   wake; have_oc
   printf "%-5s %s\n" "idx" "voltage(mV)"
   read_curve | while read -r idx mv; do printf "%-5s %s\n" "$idx" "$mv"; done
-  if [ -e "$MS" ]; then echo; echo "memory speed: $(cat "$MS") Mbps"; fi
+  echo
+  [ -e "$MS" ] && echo "memory speed: $(cat "$MS") Mbps"
+  [ -e "$TL" ] && echo "temp limit:   $(cat "$TL") degC"
+  true
 }
 
 cmd_offset(){ # $1 ABSOLUTE mV offset from stock (idempotent), persisted
@@ -84,12 +92,22 @@ cmd_mem(){ # $1 = memory speed in Mbps (e.g. 20000 = 20 Gbps), persisted
   echo "memory speed = ${mbps} Mbps ($(awk "BEGIN{printf \"%.2f\", $mbps/1000}") Gbps), persisted."
 }
 
+cmd_temp(){ # $1 = temperature throttle limit in degrees C, persisted
+  need_root
+  local c="$1"; [[ "$c" =~ ^[0-9]+$ ]] || die "temperature limit must be an integer degC"
+  (( c >= TEMP_MIN && c <= TEMP_MAX )) || die "temperature limit must be ${TEMP_MIN}..${TEMP_MAX} degC"
+  wake; have_temp
+  echo "$c" > "$TL"; persist_kv TEMP_LIMIT "$c"
+  echo "temperature limit = ${c} degC, persisted."
+}
+
 cmd_reset(){
   need_root; wake; have_oc
   [ -f "$STOCK" ] && cat "$STOCK" > "$OC"
   [ -e "$MS" ] && echo "$MEM_STOCK" > "$MS" || true
-  rm -f "$APPLIED"; persist_kv VOLTAGE_OFFSET 0; persist_kv MEM_SPEED "$MEM_STOCK"
-  echo "restored stock VF curve + memory speed (persisted state cleared)."
+  [ -e "$TL" ] && echo "$TEMP_STOCK" > "$TL" || true
+  rm -f "$APPLIED"; persist_kv VOLTAGE_OFFSET 0; persist_kv MEM_SPEED "$MEM_STOCK"; persist_kv TEMP_LIMIT "$TEMP_STOCK"
+  echo "restored stock VF curve + memory speed + temp limit (persisted state cleared)."
 }
 
 cmd_boot(){ # re-apply persisted choices (xe-gpu-oc.service)
@@ -97,7 +115,7 @@ cmd_boot(){ # re-apply persisted choices (xe-gpu-oc.service)
   [ -r "$CONF" ] || { echo "no $CONF; nothing to apply"; exit 0; }
   . "$CONF" 2>/dev/null || true
   wake
-  local v="${VOLTAGE_OFFSET:-0}" m="${MEM_SPEED:-}"
+  local v="${VOLTAGE_OFFSET:-0}" m="${MEM_SPEED:-}" t="${TEMP_LIMIT:-}"
   if [ -e "$OC" ]; then
     if [ "$v" = "custom" ] && [ -f "$APPLIED" ]; then
       cat "$APPLIED" > "$OC"; echo "boot: custom curve"
@@ -108,13 +126,19 @@ cmd_boot(){ # re-apply persisted choices (xe-gpu-oc.service)
   if [ -e "$MS" ] && [[ "$m" =~ ^[0-9]+$ ]] && [ "$m" != "$MEM_STOCK" ]; then
     echo "$m" > "$MS"; echo "boot: memory speed ${m} Mbps"
   fi
+  if [ -e "$TL" ] && [[ "$t" =~ ^[0-9]+$ ]] && [ "$t" != "$TEMP_STOCK" ]; then
+    echo "$t" > "$TL"; echo "boot: temp limit ${t} degC"
+  fi
   echo "boot: done"
 }
 
 cmd_status(){
   echo "offset=$(conf_get VOLTAGE_OFFSET)"
   echo "mem_speed=$(conf_get MEM_SPEED)"
+  echo "temp_limit=$(conf_get TEMP_LIMIT)"
   [ -e "$MS" ] && echo "mem_speed_live=$(cat "$MS" 2>/dev/null)"
+  [ -e "$TL" ] && echo "temp_limit_live=$(cat "$TL" 2>/dev/null)"
+  true
 }
 
 usage(){ cat <<EOF
@@ -124,9 +148,10 @@ xe-gpu-oc.sh - Arc Pro B60/B70 overclocking (Linux)
   offset <±mV>      set the curve to stock + offset (undervolt −, overvolt +)
   set <idx> <mV>    set a single VF-curve point
   mem <Mbps>        set VRAM (GDDR6) memory speed, e.g. 'mem 20000' = 20 Gbps
-  reset             restore stock curve + memory speed
+  temp <degC>       set the GPU temperature (throttle) limit, e.g. 'temp 95'
+  reset             restore stock curve + memory speed + temp limit
   boot              re-apply persisted choices (used by xe-gpu-oc.service)
-  status            print persisted offset + memory speed
+  status            print persisted offset + memory speed + temp limit
 
 Choices are saved to $CONF and re-applied at boot. Voltage clamped
 ${VMIN}..${VMAX} mV; memory ${MEM_MIN}..${MEM_MAX} Mbps. Needs the xe_gt_oc patch. Writes need root.
@@ -138,6 +163,7 @@ case "${1:-}" in
   offset) cmd_offset "${2:?offset mV required}" ;;
   set)    cmd_set "${2:?index}" "${3:?mV}" ;;
   mem)    cmd_mem "${2:?Mbps required}" ;;
+  temp)   cmd_temp "${2:?degC required}" ;;
   reset)  cmd_reset ;;
   boot)   cmd_boot ;;
   status) cmd_status ;;
