@@ -386,7 +386,10 @@ def build_metrics(sample):
                lambda d: {"text": (f"{d['draw_card']:.0f}" if d.get("draw_card") is not None else "—"),
                           "val": d.get("draw_card")}, spark=True, core=True),
         Metric("fan", "GPU Fan Speed", "rpm",
-               lambda d: {"text": _num(d["fan"].get("rpm")), "val": d["fan"].get("rpm")},
+               lambda d: {"text": _num(d["fan"].get("rpm")), "val": d["fan"].get("rpm"),
+                          "sub": (f"{round((d['fan'].get('duty') or 0) / 255 * 100)}% · "
+                                  f"{d['fan'].get('mode', '?')}" if d["fan"].get("duty") is not None
+                                  else d["fan"].get("mode"))},
                spark=True, core=True),
         # --- optional (filter, hidden by default) ---
         Metric("freq_act", "GPU Actual Frequency", "MHz",
@@ -404,7 +407,8 @@ def build_metrics(sample):
                lambda d: {"text": (str(round((d["fan"].get("duty") or 0) / 255 * 100))
                                    if d["fan"].get("duty") is not None else "—"),
                           "val": (round((d["fan"].get("duty") or 0) / 255 * 100)
-                                  if d["fan"].get("duty") is not None else None)},
+                                  if d["fan"].get("duty") is not None else None),
+                          "sub": (f"{d['fan'].get('rpm')} rpm" if d["fan"].get("rpm") is not None else None)},
                spark=True, fixed=(0, 100), default=False, group="Fan"),
         Metric("temp_pct", "GPU Temperature Percent", "%", _temp_pct,
                spark=True, fixed=(0, 100), default=False, group="Temperature"),
