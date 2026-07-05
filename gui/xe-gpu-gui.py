@@ -37,7 +37,9 @@ CSS = b"""
 .msub   { opacity:0.55; font-size:0.76em; }
 .filter-group { font-size:0.72em; font-weight:800; opacity:0.5; letter-spacing:.05em; margin-top:6px; }
 .specitem-label { opacity:0.55; font-size:0.74em; }
-.specitem-val   { font-weight:700; }
+.specitem-val    { font-weight:700; }
+.specitem-val.on  { color:@accent_color; }   /* active limit indicator */
+.specitem-val.off { opacity:0.4; }           /* inactive */
 
 /* --- overclock form: aligned rows, icons, animated controls --- */
 .field-icon  { opacity:0.72; }
@@ -396,12 +398,6 @@ def build_metrics(sample):
                spark=True, fixed=(0, 100), default=False, group="Temperature"),
         Metric("temp_vram", "VRAM Temperature", "°C", _temp_metric("vram"),
                spark=True, fixed=(20, 110), default=False, group="Temperature"),
-        Metric("lim_power", "GPU Power Limited", "", _limit(("pl1", "pl2", "pl4")),
-               default=False, group="Limit indicators"),
-        Metric("lim_temp", "GPU Temperature Limited", "", _limit(("thermal",)),
-               default=False, group="Limit indicators"),
-        Metric("lim_volt", "GPU Voltage Limited", "", _limit(("vr_tdc",)),
-               default=False, group="Limit indicators"),
     ]
 
 
@@ -1761,7 +1757,8 @@ class Window(Adw.ApplicationWindow):
                            selection_mode=Gtk.SelectionMode.NONE)
         rows = [("device", "Device"), ("cap", "Power cap"), ("limit", "Power limit (I1)"),
                 ("clk", "Clock limits"), ("hw", "Hardware range"), ("profile", "Power profile"),
-                ("fan", "Fan mode")]
+                ("fan", "Fan mode"), ("power_lim", "Power limited"), ("temp_lim", "Temp limited"),
+                ("volt_lim", "Voltage limited")]
         for key, label in rows:
             item = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
             k = Gtk.Label(label=label, xalign=0); k.add_css_class("specitem-label")
@@ -1927,6 +1924,16 @@ class Window(Adw.ApplicationWindow):
         self.spec_rows["hw"].set_text(f"{cl.get('rpn','—')}–{cl.get('rp0','—')} MHz")
         self.spec_rows["profile"].set_text(prof.get("current", "—"))
         self.spec_rows["fan"].set_text(data["fan"].get("mode", "—"))
+        tf = data.get("throttle_flags") or {}
+
+        def _chk(row, on):
+            w = self.spec_rows[row]
+            w.set_text("✓" if on else "✗")
+            w.remove_css_class("off" if on else "on")
+            w.add_css_class("on" if on else "off")
+        _chk("power_lim", any(tf.get(k) for k in ("pl1", "pl2", "pl4")))
+        _chk("temp_lim", tf.get("thermal"))
+        _chk("volt_lim", tf.get("vr_tdc"))
         # --- Metrics (core always, extras only when enabled) ---
         for m in self.metrics:
             tile = self.tiles.get(m.id)

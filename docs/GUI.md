@@ -23,8 +23,7 @@ number and its graph line turn red** when a sensor runs hot (within 12 °C of it
 **Metrics** are named after Intel Arc Control where a matching xe reading exists. The four core
 metrics are always shown — **GPU Frequency**, **GPU Card Power**, **GPU Temperature**, **GPU Fan
 Speed**. The **Metrics** button opens a dropdown of optional ones (hidden by default): GPU Actual
-Frequency, GPU Power, GPU Power Percent, GPU Fan Duty, GPU Temperature Percent, VRAM Temperature, and
-the limit indicators (GPU Power / Temperature / Voltage Limited). *All* / *None* toggle in bulk; the
+Frequency, GPU Power, GPU Power Percent, GPU Fan Duty, GPU Temperature Percent and VRAM Temperature. *All* / *None* toggle in bulk; the
 selection is **saved across launches** (`~/.config/xe-gpu-gui/config.json`).
 
 **Temperatures** covers every sensor — the four mains (GPU / VRAM / Mem ctrl / PCIe) plus all VRAM
