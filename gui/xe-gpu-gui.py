@@ -675,7 +675,7 @@ class VoltageCurveView(Gtk.Box):
         # ===== two-column body: voltage (left) · power / memory / thermal (right) =====
         body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        left.set_size_request(540, -1)
+        left.set_size_request(600, -1)
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True)
         body.append(left); body.append(right)
         self.append(body)
@@ -686,7 +686,7 @@ class VoltageCurveView(Gtk.Box):
                     "Undervolt for efficiency, overvolt for clock headroom. "
                     "X = idle → max, Y = voltage; dashed = stock, solid = your preview.")
         self.area = Gtk.DrawingArea(hexpand=True, vexpand=True)
-        self.area.set_size_request(500, 220)
+        self.area.set_size_request(560, 260)
         self.area.set_draw_func(self._draw)
         frame = Gtk.Frame(); frame.add_css_class("card2"); frame.set_child(self.area)
         vsec.append(frame)
@@ -1279,7 +1279,7 @@ class VoltageCurveView(Gtk.Box):
 class Window(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="Arc GPU Dashboard")
-        self.set_default_size(900, 600)
+        self.set_default_size(1240, 780)
         self.gpu = XeGpu()
 
         prov = Gtk.CssProvider(); prov.load_from_data(CSS)
