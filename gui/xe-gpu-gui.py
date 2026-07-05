@@ -21,23 +21,28 @@ CSS = b"""
 .big { font-size: 1.7em; font-weight: 800; }
 .dim { opacity: 0.60; font-size: 0.86em; }
 .chip { border-radius: 9px; padding: 8px 8px; background: alpha(@window_fg_color,0.05);
-        border-left: 3px solid alpha(@window_fg_color,0.15); }
+        border: 2px solid alpha(@window_fg_color,0.16);
+        transition: border-color 220ms ease, background 220ms ease; }
 .chip .cval { font-weight: 700; }
 .chip .clbl { opacity: 0.60; font-size: 0.74em; }
-/* temperature states: bright, readable on dark; the left border carries the state
-   colour so the value stays legible regardless. cool = teal-green (not the old dim blue) */
-.t-cool { color:#2fd07f; } .chip.t-cool{ background:alpha(#2fd07f,0.13); border-left-color:#2fd07f; }
-.t-warm { color:#f5c211; } .chip.t-warm{ background:alpha(#f5c211,0.16); border-left-color:#f5c211; }
-.t-hot  { color:#ff5c57; } .chip.t-hot { background:alpha(#ff5c57,0.18); border-left-color:#ff5c57; }
+/* graduated temperature scale by headroom to crit: teal(cool) -> green -> lime ->
+   yellow -> orange -> red(hot). the whole border + tint + value colour shift with heat. */
+.tb0{color:#22c3a6;} .chip.tb0{background:alpha(#22c3a6,0.12);border-color:#22c3a6;}
+.tb1{color:#2fd07f;} .chip.tb1{background:alpha(#2fd07f,0.13);border-color:#2fd07f;}
+.tb2{color:#9ad12f;} .chip.tb2{background:alpha(#9ad12f,0.14);border-color:#9ad12f;}
+.tb3{color:#f5c211;} .chip.tb3{background:alpha(#f5c211,0.15);border-color:#f5c211;}
+.tb4{color:#ff9f45;} .chip.tb4{background:alpha(#ff9f45,0.16);border-color:#ff9f45;}
+.tb5{color:#ff6b3d;} .chip.tb5{background:alpha(#ff6b3d,0.17);border-color:#ff6b3d;}
+.tb6{color:#ff4d4d;} .chip.tb6{background:alpha(#ff4d4d,0.19);border-color:#ff4d4d;}
 .info { opacity:0.45; }
 
 /* --- dashboard metric tiles (Windows-style live panel w/ sparklines) --- */
 .mtile  { background: alpha(@window_fg_color,0.05); border-radius: 12px; padding: 9px 11px; }
 .mlabel { font-size:0.70em; font-weight:800; opacity:0.55; letter-spacing:.06em; }
 .mvalue { font-size:1.9em; font-weight:800; }
-.mtile.t-cool .mvalue, .t-cool.mvalue { color:#2fd07f; }
-.mtile.t-warm .mvalue, .t-warm.mvalue { color:#f5c211; }
-.mtile.t-hot  .mvalue, .t-hot.mvalue  { color:#ff5c57; }
+.mvalue.tb0{color:#22c3a6;} .mvalue.tb1{color:#2fd07f;} .mvalue.tb2{color:#9ad12f;}
+.mvalue.tb3{color:#f5c211;} .mvalue.tb4{color:#ff9f45;} .mvalue.tb5{color:#ff6b3d;}
+.mvalue.tb6{color:#ff4d4d;}
 .munit  { opacity:0.50; font-size:0.9em; }
 .msub   { opacity:0.55; font-size:0.76em; }
 
@@ -271,15 +276,23 @@ PRESETS = {
 }
 
 
-def tclass(c, crit):
-    if crit and c >= crit - 10:
-        return "t-hot"
-    if crit and c >= crit - 25:
-        return "t-warm"
-    return "t-cool"
+BAND_CLASSES = ("tb0", "tb1", "tb2", "tb3", "tb4", "tb5", "tb6")
+_BAND_RGB = {"tb0": (0.13, 0.76, 0.65), "tb1": (0.18, 0.82, 0.50), "tb2": (0.60, 0.82, 0.18),
+             "tb3": (0.96, 0.76, 0.07), "tb4": (1.0, 0.62, 0.27), "tb5": (1.0, 0.42, 0.24),
+             "tb6": (1.0, 0.30, 0.30)}
 
 
-STATE_RGB = {"t-cool": (0.18, 0.82, 0.50), "t-warm": (0.96, 0.76, 0.07), "t-hot": (1.0, 0.36, 0.34)}
+def temp_style(c, crit):
+    """Graduated temperature colour by headroom to the crit limit (falls back to an
+    absolute scale if crit is unknown). Returns (band_class, rgb)."""
+    head = (crit - c) if crit else (100 - c)
+    for thresh, cls in ((45, "tb0"), (35, "tb1"), (27, "tb2"), (20, "tb3"), (13, "tb4"), (7, "tb5")):
+        if head >= thresh:
+            return cls, _BAND_RGB[cls]
+    return "tb6", _BAND_RGB["tb6"]
+
+
+SPARK_MAXPTS = 120        # sparkline history capacity — oldest drops as new samples arrive
 
 
 class MetricTile(Gtk.Box):
@@ -288,7 +301,7 @@ class MetricTile(Gtk.Box):
     def __init__(self, label, unit="", spark=True, fixed=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         self.add_css_class("mtile"); self.set_hexpand(True)
-        self.hist = collections.deque(maxlen=90)
+        self.hist = collections.deque(maxlen=SPARK_MAXPTS)
         self._fixed = fixed              # (lo, hi) fixed y-range, or None = autoscale
         self._rgb = (0.21, 0.52, 0.89)
         self.lbl = Gtk.Label(label=label.upper(), xalign=0); self.lbl.add_css_class("mlabel")
@@ -313,7 +326,7 @@ class MetricTile(Gtk.Box):
         self.val.set_text(text)
         if rgb is not None:
             self._rgb = rgb
-        for cc in ("t-cool", "t-warm", "t-hot"):
+        for cc in BAND_CLASSES:
             self.val.remove_css_class(cc)
         if state:
             self.val.add_css_class(state)
@@ -330,12 +343,16 @@ class MetricTile(Gtk.Box):
         if hi <= lo:
             hi = lo + 1
         n = len(self.hist)
-        X = lambda i: i / (n - 1) * w                       # noqa: E731
+        cap = self.hist.maxlen or n
+        step = w / max(cap - 1, 1)
+        # newest sample pinned at the right edge; the trace grows leftward and, once the
+        # history is full, scrolls right-to-left as the oldest points drop off.
+        X = lambda i: w - (n - 1 - i) * step                 # noqa: E731
         Y = lambda v: h - 2 - (v - lo) / (hi - lo) * (h - 4)  # noqa: E731
-        cr.move_to(0, h)
+        cr.move_to(X(0), h)
         for i, v in enumerate(self.hist):
             cr.line_to(X(i), Y(v))
-        cr.line_to(w, h); cr.close_path()
+        cr.line_to(X(n - 1), h); cr.close_path()
         cr.set_source_rgba(r, g, b, 0.15); cr.fill()
         cr.set_line_width(1.7); cr.set_source_rgba(r, g, b, 0.92)
         for i, v in enumerate(self.hist):
@@ -1679,7 +1696,7 @@ class Window(Adw.ApplicationWindow):
                    .replace("--clk-min", "min").replace("--clk-max", "max").replace("--profile", "profile"))
 
     def _tc(self, w, cls):
-        for x in ("t-cool", "t-warm", "t-hot"):
+        for x in BAND_CLASSES:
             w.remove_css_class(x)
         w.add_css_class(cls)
 
@@ -1747,8 +1764,8 @@ class Window(Adw.ApplicationWindow):
             self.editor.cur_pkg = mains["pkg"]["c"]
         pkg = mains.get("pkg")
         if pkg:
-            st = tclass(pkg["c"], pkg["crit"])
-            self.m_temp.update(str(pkg["c"]), spark_val=pkg["c"], rgb=STATE_RGB[st], state=st,
+            st, srgb = temp_style(pkg["c"], pkg["crit"])
+            self.m_temp.update(str(pkg["c"]), spark_val=pkg["c"], rgb=srgb, state=st,
                                sub=(f"limit {pkg['crit']}°C" if pkg.get("crit") else None))
         fn = data["fan"]; rpm = fn.get("rpm"); duty = fn.get("duty")
         dpct = round((duty or 0) / 255 * 100) if duty is not None else None
@@ -1764,7 +1781,8 @@ class Window(Adw.ApplicationWindow):
                 val.set_text("—"); continue
             val.set_text(f"{t['c']}°{' 🔥' if t['c'] == hottest else ''}")
             bar.set_max_value(t["crit"] or 110); bar.set_value(min(t["c"], t["crit"] or 110))
-            self._tc(cell, tclass(t["c"], t["crit"])); self._tc(val, tclass(t["c"], t["crit"]))
+            st, _ = temp_style(t["c"], t["crit"])
+            self._tc(cell, st); self._tc(val, st)
         for i, t in enumerate(sorted(data["vram"], key=lambda x: int(x["label"].rsplit("_", 1)[-1]))):
             key = t["label"]
             if key not in self.vram_chips:
@@ -1776,7 +1794,8 @@ class Window(Adw.ApplicationWindow):
                 self.vram_chips[key] = (chip, cv)
             chip, cv = self.vram_chips[key]
             cv.set_text(f"{t['c']}°{' 🔥' if t['c'] == hottest else ''}")
-            self._tc(chip, tclass(t["c"], t["crit"]))
+            st, _ = temp_style(t["c"], t["crit"])
+            self._tc(chip, st)
         return False
 
 
