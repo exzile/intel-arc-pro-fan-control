@@ -344,13 +344,16 @@ class Metric:
         self.section = section    # "metrics" or "temps" — which dashboard section the tile lives in
 
 
+FLAME_MIN_C = 60          # only flag the hottest sensor once it's actually warm (not at idle)
+
+
 def _temp_metric(lbl):
     def f(d):
         t = d["temp_by_label"].get(lbl)
         if not t:
             return {"text": "—"}
         rgb, st = temp_view(t["c"], t["crit"])
-        flame = " 🔥" if d.get("_hottest") == t["c"] else ""
+        flame = " 🔥" if (d.get("_hottest") == t["c"] and t["c"] >= FLAME_MIN_C) else ""
         return {"text": str(t["c"]) + flame, "val": t["c"], "state": st, "rgb": rgb,
                 "sub": (f"limit {t['crit']}°C" if t.get("crit") else None)}
     return f
