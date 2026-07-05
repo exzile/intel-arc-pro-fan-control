@@ -17,7 +17,7 @@ Live (2 s) monitoring. A **Specifications** row spans the top — the fixed limi
 profile, fan mode.
 
 Below it, **Metrics** and **Temperatures** are two labelled sections that fill the rest of the space,
-each a wrap-to-fit grid of uniform **tiles with scrolling sparklines**. Tiles are neutral; **only the
+each a wrap-to-fit grid of uniform **tiles with a custom icon (gauge / bolt / fan / RAM chip / thermometer), and scrolling sparklines**. Tiles are neutral; **only the
 number and its graph line turn red** when a sensor runs hot (within 12 °C of its crit limit).
 
 **Metrics** are named after Intel Arc Control where a matching xe reading exists. The core

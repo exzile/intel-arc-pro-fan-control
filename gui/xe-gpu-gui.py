@@ -5,7 +5,7 @@
 # xe_gt_oc patch exposes .../gt0/oc/vf_curve).
 # Controls call xe-fan-curve / xe-gpu-tune / xe-gpu-oc via pkexec (polkit prompts
 # for writes). Reads are unprivileged sysfs; no kernel poking here.
-import os, glob, subprocess, threading, collections, json
+import os, glob, subprocess, threading, collections, json, math
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -337,11 +337,12 @@ def _temp_label(lbl):
 
 class Metric:
     def __init__(self, mid, label, unit, compute, spark=False, fixed=None, default=True,
-                 group="GPU", core=False, section="metrics"):
+                 group="GPU", core=False, section="metrics", icon=None):
         self.id = mid; self.label = label; self.unit = unit; self.compute = compute
         self.spark = spark; self.fixed = fixed; self.default = default; self.group = group
-        self.core = core          # core metrics are always shown; others are filter-toggled
+        self.core = core          # core metrics default to visible; all are filter-toggleable
         self.section = section    # "metrics" or "temps" — which dashboard section the tile lives in
+        self.icon = icon          # custom vector icon key (freq/power/fan/temp/vram)
 
 
 FLAME_MIN_C = 60          # only flag the hottest sensor once it's actually warm (not at idle)
@@ -384,48 +385,48 @@ def build_metrics(sample):
         # --- core (always shown) ---
         Metric("freq", "GPU Frequency", "MHz",
                lambda d: {"text": _num(d["clocks"].get("cur")), "val": d["clocks"].get("cur")},
-               spark=True, fixed=(0, rp0), core=True, group="Clocks"),
+               spark=True, fixed=(0, rp0), core=True, group="Clocks", icon="freq"),
         Metric("power_card", "GPU Card Power", "W",
                lambda d: {"text": (f"{d['draw_card']:.0f}" if d.get("draw_card") is not None else "—"),
-                          "val": d.get("draw_card")}, spark=True, core=True, group="Power"),
+                          "val": d.get("draw_card")}, spark=True, core=True, group="Power", icon="power"),
         Metric("fan", "GPU Fan Speed", "rpm",
                lambda d: {"text": _num(d["fan"].get("rpm")), "val": d["fan"].get("rpm"),
                           "sub": (f"{round((d['fan'].get('duty') or 0) / 255 * 100)}% · "
                                   f"{d['fan'].get('mode', '?')}" if d["fan"].get("duty") is not None
                                   else d["fan"].get("mode"))},
-               spark=True, core=True, group="Fan"),
+               spark=True, core=True, group="Fan", icon="fan"),
         # --- optional (filter, hidden by default) ---
         Metric("freq_act", "GPU Actual Frequency", "MHz",
                lambda d: {"text": _num(d["clocks"].get("act")), "val": d["clocks"].get("act")},
-               spark=True, fixed=(0, rp0), default=False, group="Clocks"),
+               spark=True, fixed=(0, rp0), default=False, group="Clocks", icon="freq"),
         Metric("power_gpu", "GPU Power", "W",
                lambda d: {"text": (f"{d['draw_pkg']:.0f}" if d.get("draw_pkg") is not None else "—"),
-                          "val": d.get("draw_pkg")}, spark=True, default=False, group="Power"),
+                          "val": d.get("draw_pkg")}, spark=True, default=False, group="Power", icon="power"),
         Metric("power_pct", "GPU Power Percent", "%",
                lambda d: ({"text": str(round(d["draw_card"] / d["power"]["cap_w"] * 100)),
                            "val": round(d["draw_card"] / d["power"]["cap_w"] * 100)}
                           if d.get("draw_card") is not None and d["power"].get("cap_w") else {"text": "—"}),
-               spark=True, fixed=(0, 100), default=False, group="Power"),
+               spark=True, fixed=(0, 100), default=False, group="Power", icon="power"),
         Metric("fan_pct", "GPU Fan Duty", "%",
                lambda d: {"text": (str(round((d["fan"].get("duty") or 0) / 255 * 100))
                                    if d["fan"].get("duty") is not None else "—"),
                           "val": (round((d["fan"].get("duty") or 0) / 255 * 100)
                                   if d["fan"].get("duty") is not None else None),
                           "sub": (f"{d['fan'].get('rpm')} rpm" if d["fan"].get("rpm") is not None else None)},
-               spark=True, fixed=(0, 100), default=False, group="Fan"),
+               spark=True, fixed=(0, 100), default=False, group="Fan", icon="fan"),
         Metric("temp_pct", "GPU Temperature Percent", "%", _temp_pct,
-               spark=True, fixed=(0, 100), default=False, group="Temperature"),
+               spark=True, fixed=(0, 100), default=False, group="Temperature", icon="temp"),
         Metric("vram_used", "VRAM Used", "GiB",
                lambda d: ({"text": f"{d['vmem']['used'] / 1073741824:.1f}",
                            "val": d["vmem"]["used"] / 1073741824}
                           if d.get("vmem") else {"text": "—", "sub": "needs xe-gpu-vram.service"}),
                spark=True, fixed=(0, ((sample.get("vmem") or {}).get("total") or 25_769_803_776) / 1073741824),
-               default=False, group="VRAM"),
+               default=False, group="VRAM", icon="vram"),
         Metric("vram_pct", "VRAM Usage", "%",
                lambda d: ({"text": str(round(d["vmem"]["used"] / d["vmem"]["total"] * 100)),
                            "val": round(d["vmem"]["used"] / d["vmem"]["total"] * 100)}
                           if d.get("vmem") else {"text": "—", "sub": "needs xe-gpu-vram.service"}),
-               spark=True, fixed=(0, 100), default=False, group="VRAM"),
+               spark=True, fixed=(0, 100), default=False, group="VRAM", icon="vram"),
     ]
 
 
@@ -440,21 +441,84 @@ def build_temp_metrics(sample):
         label = ("VRAM ch " + lbl.rsplit("_", 1)[-1]) if lbl.startswith("vram_ch_") else _temp_label(lbl)
         out.append(Metric(f"temp_{lbl}", label, "°C", _temp_metric(lbl), spark=True,
                           fixed=(20, 110), default=False, core=(lbl == "pkg"),
-                          group="Temperatures", section="temps"))
+                          group="Temperatures", section="temps", icon="temp"))
     return out
 
 
+# ---- small custom vector icons (drawn in Cairo so they always render + tint) ----
+def _ic_freq(cr, w, h, col):        # gauge / speedometer
+    cx, cy, R = w / 2, h - 2, min(w, h) / 2
+    cr.set_source_rgba(*col, 0.9); cr.set_line_width(1.5)
+    cr.arc(cx, cy, R - 1, math.pi, 2 * math.pi); cr.stroke()
+    cr.move_to(cx, cy); cr.line_to(cx + (R - 2) * 0.7, cy - (R - 2) * 0.7); cr.stroke()
+
+
+def _ic_power(cr, w, h, col):       # lightning bolt
+    cr.set_source_rgba(*col, 0.95); cx = w / 2
+    pts = [(cx + 1, 1), (cx - 3.5, h * 0.58), (cx - 0.5, h * 0.58),
+           (cx - 1.5, h - 1), (cx + 4, h * 0.4), (cx + 1, h * 0.4)]
+    cr.move_to(*pts[0])
+    for p in pts[1:]:
+        cr.line_to(*p)
+    cr.close_path(); cr.fill()
+
+
+def _ic_fan(cr, w, h, col):         # fan: hub + 3 curved blades
+    cx, cy = w / 2, h / 2; R = min(w, h) / 2 - 0.5
+    cr.set_source_rgba(*col, 0.92)
+    for k in range(3):
+        cr.save(); cr.translate(cx, cy); cr.rotate(k * 2 * math.pi / 3)
+        cr.move_to(0, 0)
+        cr.curve_to(R * 0.15, -R * 0.55, R * 0.95, -R * 0.4, R, 0)
+        cr.curve_to(R * 0.8, R * 0.25, R * 0.35, R * 0.2, 0, 0)
+        cr.close_path(); cr.fill(); cr.restore()
+    cr.arc(cx, cy, R * 0.22, 0, 6.29); cr.set_source_rgba(*col, 1.0); cr.fill()
+
+
+def _ic_temp(cr, w, h, col):        # thermometer: tube + bulb
+    cx = w / 2; cr.set_source_rgba(*col, 0.95); cr.set_line_width(1.6)
+    cr.move_to(cx, 2); cr.line_to(cx, h - 5); cr.stroke()
+    cr.arc(cx, h - 3.5, 2.6, 0, 6.29); cr.fill()
+    cr.set_line_width(1.1)
+    for ty in (4, 7, 10):
+        cr.move_to(cx + 1.5, ty); cr.line_to(cx + 4, ty); cr.stroke()
+
+
+def _ic_vram(cr, w, h, col):        # RAM chip: body + die line + pins
+    cr.set_source_rgba(*col, 0.95); cr.set_line_width(1.3)
+    x0, y0, x1, y1 = 2.5, 2.5, w - 2.5, h - 4
+    cr.rectangle(x0, y0, x1 - x0, y1 - y0); cr.stroke()
+    cr.move_to(x0 + 2, (y0 + y1) / 2); cr.line_to(x1 - 2, (y0 + y1) / 2); cr.stroke()
+    for i in range(4):
+        px = x0 + (i + 0.5) * (x1 - x0) / 4
+        cr.move_to(px, y1); cr.line_to(px, y1 + 2.4); cr.stroke()
+
+
+ICONS = {"freq": _ic_freq, "power": _ic_power, "fan": _ic_fan, "temp": _ic_temp, "vram": _ic_vram}
+
+
 class MetricTile(Gtk.Box):
-    """A dashboard metric card: label, big value + unit, a sub-line, and a live
+    """A dashboard metric card: an icon + label, big value + unit, a sub-line, and a live
     scrolling sparkline of recent history — the Windows-style live metric panel."""
-    def __init__(self, label, unit="", spark=True, fixed=None):
+    def __init__(self, label, unit="", spark=True, fixed=None, icon=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         self.add_css_class("mtile"); self.set_hexpand(True)
         self.hist = collections.deque(maxlen=SPARK_MAXPTS)
         self._fixed = fixed              # (lo, hi) fixed y-range, or None = autoscale
         self._rgb = (0.21, 0.52, 0.89)
+        self._icon = icon
+        head = Gtk.Box(spacing=5)
+        if icon in ICONS:
+            self.icon_area = Gtk.DrawingArea()
+            self.icon_area.set_content_width(18); self.icon_area.set_content_height(15)
+            self.icon_area.set_valign(Gtk.Align.CENTER)
+            self.icon_area.set_draw_func(lambda a, cr, w, h, *_: ICONS[self._icon](cr, w, h, self._rgb))
+            head.append(self.icon_area)
+        else:
+            self.icon_area = None
         self.lbl = Gtk.Label(label=label.upper(), xalign=0); self.lbl.add_css_class("mlabel")
-        self.append(self.lbl)
+        head.append(self.lbl)
+        self.append(head)
         vr = Gtk.Box(spacing=4)
         self.val = Gtk.Label(label="—", xalign=0); self.val.add_css_class("mvalue")
         vr.append(self.val)
@@ -473,8 +537,10 @@ class MetricTile(Gtk.Box):
 
     def update(self, text, spark_val=None, rgb=None, state=None, sub=None):
         self.val.set_text(text)
-        if rgb is not None:
+        if rgb is not None and rgb != self._rgb:
             self._rgb = rgb
+            if self.icon_area is not None:
+                self.icon_area.queue_draw()      # re-tint the icon when the colour changes
         # only the number colours (tile stays neutral); "hot" => red
         if state == "hot":
             self.val.add_css_class("hot")
@@ -1740,7 +1806,7 @@ class Window(Adw.ApplicationWindow):
                            selection_mode=Gtk.SelectionMode.NONE)
         flow.set_filter_func(self._metric_visible)
         for m in metrics:
-            tile = MetricTile(m.label, m.unit, spark=m.spark, fixed=m.fixed)
+            tile = MetricTile(m.label, m.unit, spark=m.spark, fixed=m.fixed, icon=m.icon)
             tile.metric_id = m.id
             self.tiles[m.id] = tile
             flow.append(tile)
