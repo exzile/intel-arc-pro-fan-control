@@ -464,6 +464,14 @@ class CurveEditor(Gtk.Box):
         bar.append(icon_button("edit-undo-symbolic",
                                "Load the card's stock fan curve into the editor (press Apply to write it)",
                                self._stock, label="Stock"))
+        bar.append(icon_button("power-profile-balanced-symbolic",
+                               "Auto: hand the fan back to the card's stock auto table",
+                               lambda *_: run_priv(["xe-fan-curve", "auto"], self.window,
+                                                   self.window.refresh), label="Auto"))
+        bar.append(icon_button("power-profile-performance-symbolic",
+                               "Max: run the fan at full speed",
+                               lambda *_: run_priv(["xe-fan-curve", "max"], self.window,
+                                                   self.window.refresh), label="Max"))
         self.hint = Gtk.Label(xalign=0, hexpand=True)
         self.hint.add_css_class("dim")
         bar.append(self.hint)
@@ -474,7 +482,9 @@ class CurveEditor(Gtk.Box):
         self.append(bar)
         note = Gtk.Label(
             label="Drag points to shape the curve · right-click a point to remove · "
-                  "X = GPU temp °C, Y = fan speed %. The dashed line is the current package temp.",
+                  "X = GPU temp °C, Y = fan speed %. The dashed line is the current package temp. "
+                  "Apply writes it as a manual curve; Auto hands back to the stock table; Max runs "
+                  "full speed.",
             xalign=0, wrap=True)
         note.add_css_class("dim")
         self.append(note)
@@ -1509,7 +1519,7 @@ class Window(Adw.ApplicationWindow):
         self.editor = CurveEditor(self.gpu, self)
         curve_wrap = Gtk.Box(margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
         curve_wrap.append(self.editor)
-        p2 = self.stack.add_titled(curve_wrap, "curve", "Fan Curve")
+        p2 = self.stack.add_titled(curve_wrap, "curve", "Fan Control")
         p2.set_icon_name("power-profile-balanced-symbolic")
 
         # Overclock tab — only if the xe_gt_oc patch exposes the VF curve
@@ -1551,33 +1561,13 @@ class Window(Adw.ApplicationWindow):
         parent.append(c)
 
     def _build_controls(self, parent):
-        # Fan quick-actions always live here. Power/clocks/profile live here ONLY when
-        # there's no Overclock tab (no xe_gt_oc patch); otherwise they're consolidated
-        # into the Overclock tab so all performance knobs sit together.
-        oc = self.gpu.oc_available
-        c = card("Fan" if oc else "Controls",
-                 "Writes run the xe-* helpers via pkexec (asks for your password).")
-        fan = Gtk.Box(spacing=6)
-        fl = Gtk.Label(label="Fan", xalign=0, width_chars=5); fl.add_css_class("dim")
-        fan.append(fl)
-        fan.append(icon_button("document-edit-symbolic", "Open the fan-curve editor",
-                               lambda *_: self.stack.set_visible_child_name("curve"),
-                               label="Curve"))
-        fan.append(icon_button("power-profile-balanced-symbolic",
-                               "Auto: hand the fan back to the card's stock table",
-                               lambda *_: run_priv(["xe-fan-curve", "auto"], self, self.refresh)))
-        fan.append(icon_button("power-profile-performance-symbolic",
-                               "Max: run the fan at full speed",
-                               lambda *_: run_priv(["xe-fan-curve", "max"], self, self.refresh)))
-        c.append(fan)
-
-        if oc:
-            hint = Gtk.Label(
-                label="Power cap, clock limits & power profile are on the Overclock tab.",
-                xalign=0, wrap=True)
-            hint.add_css_class("dim"); hint.set_margin_top(4)
-            c.append(hint); parent.append(c)
+        # Power/clocks/profile live here ONLY when there's no Overclock tab (no xe_gt_oc
+        # patch); with the patch they're consolidated onto the Overclock tab. Fan
+        # quick-actions (Auto/Max) + the curve editor live on the Fan Control tab. So on
+        # a patched card the Dashboard is monitoring-only — nothing to build here.
+        if self.gpu.oc_available:
             return
+        c = card("Power & clocks", "Writes run the xe-* helpers via pkexec (asks for your password).")
 
         cl = self.gpu.clocks()
         lo, hi = cl.get("rpn") or 400, cl.get("rp0") or 2400

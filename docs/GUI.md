@@ -21,21 +21,23 @@ it's throttling.
 Below that, a **scrollable Temperatures grid** shows every sensor — the four mains
 (pkg / mctrl / pcie / vram) plus all VRAM channels — colour-coded by headroom to each sensor's crit
 limit (a coloured left-border + value: **teal-green** cool, **amber** warm, **red** hot — the old
-hard-to-read blue is gone), with a flame on the hottest. Controls:
+hard-to-read blue is gone), with a flame on the hottest.
 
-- **Fan**: *Curve* (opens the editor), *Auto* (stock table), *Max* (full speed).
-- **Power cap, clock limits & power profile** live on the **Overclock tab** (all performance knobs
-  in one place). On a system *without* the `xe_gt_oc` patch — where there's no Overclock tab — they
-  fall back to spinners here (**Power cap / Min clock / Max clock** → **Apply** / **Reset**).
+Fan controls live on the **Fan Control tab**. Power cap, clock limits & power profile live on the
+**Overclock tab** (all performance knobs in one place) — so with the `xe_gt_oc` patch the Dashboard
+is **monitoring-only**. On a system *without* the patch (no Overclock tab), power/clock controls
+fall back to spinners on the Dashboard (**Power cap / Min clock / Max clock** → **Apply** / **Reset**).
 
-## Fan Curve tab
-A graphical editor for the 10-point hardware fan table:
+## Fan Control tab
+A graphical editor for the 10-point hardware fan table, plus the fan mode buttons:
 
 - **Drag** the points to shape the curve (X = GPU temp °C, Y = fan speed %).
 - **Right-click** a point to remove it; **＋ Point** adds one at the widest gap (up to 10).
 - **Preset…** loads Silent / Balanced / Cool profiles; **Reload** reads the curve currently on the card.
+- **Stock** loads the card's stock curve into the editor.
 - The dashed vertical line shows the current package temperature.
-- **Apply** writes it as the manual curve (via `xe-fan-curve set …`, prompted by polkit).
+- **Apply** writes it as the manual curve; **Auto** hands the fan back to the card's stock table;
+  **Max** runs the fan at full speed (all via `xe-fan-curve …`, prompted by polkit).
 
 ## Overclock tab
 
