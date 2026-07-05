@@ -1696,7 +1696,7 @@ class Window(Adw.ApplicationWindow):
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True)
         row.append(left); row.append(right)
         self._build_specs(left)                    # Specifications (top-left)
-        self._build_temps(left)                    # Temperatures (under it, left column)
+        self._build_temps(left, sample)            # Temperatures (under it, left column)
         self._build_controls(left)                 # power/clock card only when there's no OC tab
         self._build_metrics_card(right)            # live Metrics fill the right column
         return row
@@ -1784,26 +1784,29 @@ class Window(Adw.ApplicationWindow):
             self.spec_rows[key] = v
         c.append(g); parent.append(c)
 
-    def _build_temps(self, parent):
-        c = card("Temperatures", "All sensors the driver exposes. Colour = headroom to the crit limit.")
+    def _build_temps(self, parent, sample):
+        c = card("Temperatures", "All sensors, colour-graded by headroom to crit, with live sparklines.")
         c.set_vexpand(True)
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        self.main_t = {}
+        self.temp_tiles = {}
+        mains = [t["label"] for t in sample.get("mains", [])]
         mg = Gtk.Grid(column_spacing=8, row_spacing=8, column_homogeneous=True)
-        for i, name in enumerate(("pkg", "mctrl", "pcie", "vram")):
-            cell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2); cell.add_css_class("chip")
-            lab = Gtk.Label(label=name, xalign=0); lab.add_css_class("clbl")
-            val = Gtk.Label(label="—", xalign=0); val.add_css_class("big")
-            bar = Gtk.LevelBar(min_value=0, max_value=110, hexpand=True)
-            cell.append(lab); cell.append(val); cell.append(bar)
-            mg.attach(cell, i % 2, i // 2, 1, 1)
-            self.main_t[name] = (cell, val, bar)
+        for i, lbl in enumerate(mains):
+            tile = MetricTile(_temp_label(lbl), "°C", spark=True, fixed=(20, 110))
+            self.temp_tiles[lbl] = tile
+            mg.attach(tile, i % 2, i // 2, 1, 1)
         inner.append(mg)
-        vh = Gtk.Label(label="VRAM CHANNELS", xalign=0); vh.add_css_class("section"); vh.set_margin_top(2)
-        inner.append(vh)
-        self.vram_chips = {}
-        self.vram_grid = Gtk.Grid(column_spacing=6, row_spacing=6, column_homogeneous=True)
-        inner.append(self.vram_grid)
+        chans = sorted([t["label"] for t in sample.get("vram", [])],
+                       key=lambda x: int(x.rsplit("_", 1)[-1]))
+        if chans:
+            vh = Gtk.Label(label="VRAM CHANNELS", xalign=0); vh.add_css_class("section")
+            vh.set_margin_top(2); inner.append(vh)
+            cg = Gtk.Grid(column_spacing=8, row_spacing=8, column_homogeneous=True)
+            for i, lbl in enumerate(chans):
+                tile = MetricTile("ch " + lbl.rsplit("_", 1)[-1], "°C", spark=True, fixed=(20, 110))
+                self.temp_tiles[lbl] = tile
+                cg.attach(tile, i % 2, i // 2, 1, 1)
+            inner.append(cg)
         sw = Gtk.ScrolledWindow(vexpand=True)
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         sw.set_child(inner)
@@ -1977,28 +1980,17 @@ class Window(Adw.ApplicationWindow):
             self.editor.cur_pkg = pkg["c"]
         if getattr(self, "oc_view", None) is not None:
             self.oc_view.set_telemetry(cl.get("cur"), pkg["c"] if pkg else None, data["fan"].get("rpm"))
-        # --- temperatures grid ---
-        mains = {t["label"]: t for t in data["mains"]}
-        hottest = max((t["c"] for t in data["mains"] + data["vram"]), default=None)
-        for name, (cell, val, bar) in self.main_t.items():
-            t = mains.get(name)
-            if not t:
-                val.set_text("—"); continue
-            val.set_text(f"{t['c']}°{' 🔥' if t['c'] == hottest else ''}")
-            bar.set_max_value(t["crit"] or 110); bar.set_value(min(t["c"], t["crit"] or 110))
-            st, _ = temp_style(t["c"], t["crit"]); self._tc(cell, st); self._tc(val, st)
-        for i, t in enumerate(sorted(data["vram"], key=lambda x: int(x["label"].rsplit("_", 1)[-1]))):
-            key = t["label"]
-            if key not in self.vram_chips:
-                chip = Gtk.Box(orientation=Gtk.Orientation.VERTICAL); chip.add_css_class("chip")
-                cl_ = Gtk.Label(label="ch" + key.rsplit("_", 1)[-1], xalign=0.5); cl_.add_css_class("clbl")
-                cv = Gtk.Label(xalign=0.5); cv.add_css_class("cval")
-                chip.append(cl_); chip.append(cv)
-                self.vram_grid.attach(chip, i % 4, i // 4, 1, 1)
-                self.vram_chips[key] = (chip, cv)
-            chip, cv = self.vram_chips[key]
-            cv.set_text(f"{t['c']}°{' 🔥' if t['c'] == hottest else ''}")
-            st, _ = temp_style(t["c"], t["crit"]); self._tc(chip, st)
+        # --- temperatures (colour-graded tiles with sparklines) ---
+        alltemps = data["mains"] + data["vram"]
+        hottest = max((t["c"] for t in alltemps), default=None)
+        for t in alltemps:
+            tile = self.temp_tiles.get(t["label"])
+            if tile is None:
+                continue
+            st, rgb = temp_style(t["c"], t["crit"])
+            txt = f"{t['c']}" + (" 🔥" if t["c"] == hottest else "")
+            tile.update(txt, spark_val=t["c"], rgb=rgb, state=st,
+                        sub=(f"limit {t['crit']}°C" if t.get("crit") else None))
         return False
 
 
