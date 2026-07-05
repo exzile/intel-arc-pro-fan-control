@@ -381,16 +381,16 @@ def build_metrics(sample):
         # --- core (always shown) ---
         Metric("freq", "GPU Frequency", "MHz",
                lambda d: {"text": _num(d["clocks"].get("cur")), "val": d["clocks"].get("cur")},
-               spark=True, fixed=(0, rp0), core=True),
+               spark=True, fixed=(0, rp0), core=True, group="Clocks"),
         Metric("power_card", "GPU Card Power", "W",
                lambda d: {"text": (f"{d['draw_card']:.0f}" if d.get("draw_card") is not None else "—"),
-                          "val": d.get("draw_card")}, spark=True, core=True),
+                          "val": d.get("draw_card")}, spark=True, core=True, group="Power"),
         Metric("fan", "GPU Fan Speed", "rpm",
                lambda d: {"text": _num(d["fan"].get("rpm")), "val": d["fan"].get("rpm"),
                           "sub": (f"{round((d['fan'].get('duty') or 0) / 255 * 100)}% · "
                                   f"{d['fan'].get('mode', '?')}" if d["fan"].get("duty") is not None
                                   else d["fan"].get("mode"))},
-               spark=True, core=True),
+               spark=True, core=True, group="Fan"),
         # --- optional (filter, hidden by default) ---
         Metric("freq_act", "GPU Actual Frequency", "MHz",
                lambda d: {"text": _num(d["clocks"].get("act")), "val": d["clocks"].get("act")},
@@ -1782,12 +1782,16 @@ class Window(Adw.ApplicationWindow):
                     gl = Gtk.Label(label=m.group.upper(), xalign=0); gl.add_css_class("filter-group")
                     parent.append(gl); lastgroup = m.group
                 cb = Gtk.CheckButton(label=m.label)
-                cb.set_active(self.visible.get(m.id, m.default))
-                cb.connect("toggled", self._on_filter_toggle, m.id)
-                self._filter_checks[m.id] = cb
+                if m.core:                       # core metrics are always shown — locked on
+                    cb.set_active(True); cb.set_sensitive(False)
+                    cb.set_tooltip_text("Always shown (core metric)")
+                else:
+                    cb.set_active(self.visible.get(m.id, m.default))
+                    cb.connect("toggled", self._on_filter_toggle, m.id)
+                    self._filter_checks[m.id] = cb
                 parent.append(cb)
-        fill(colA, [m for m in self._optional if m.section == "metrics"])   # metrics groups
-        fill(colB, [m for m in self._optional if m.section == "temps"])     # temperature sensors
+        fill(colA, [m for m in self.metrics if m.section == "metrics"])   # metric groups (core + optional)
+        fill(colB, [m for m in self.metrics if m.section == "temps"])     # temperature sensors
         sw = Gtk.ScrolledWindow(vexpand=True)
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         sw.set_child(cols)
