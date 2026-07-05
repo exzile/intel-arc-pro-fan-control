@@ -1705,9 +1705,9 @@ class Window(Adw.ApplicationWindow):
         sample = self.gpu.snapshot()
         self.metrics = build_metrics(sample) + build_temp_metrics(sample)
         self.metric_by_id = {m.id: m for m in self.metrics}
-        self._optional = [m for m in self.metrics if not m.core]
         saved = load_config().get("metrics", {})
-        self.visible = {m.id: bool(saved.get(m.id, m.default)) for m in self._optional}
+        # every metric is toggleable; the four "core" ones just default to visible
+        self.visible = {m.id: bool(saved.get(m.id, m.default or m.core)) for m in self.metrics}
         self.tiles = {}
         self._energy_prev = {}
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
@@ -1745,8 +1745,7 @@ class Window(Adw.ApplicationWindow):
 
     def _metric_visible(self, child):
         mid = getattr(child.get_child(), "metric_id", None)
-        m = self.metric_by_id.get(mid)
-        return bool(m and (m.core or self.visible.get(mid, False)))
+        return bool(self.visible.get(mid, False))
 
     def _refilter(self):
         self.metrics_flow.invalidate_filter(); self.temps_flow.invalidate_filter()
@@ -1775,22 +1774,20 @@ class Window(Adw.ApplicationWindow):
         cols.append(colA); cols.append(colB)
         self._filter_checks = {}
 
+        order = {"Clocks": 0, "Power": 1, "Fan": 2, "Temperature": 3, "VRAM": 4, "Temperatures": 5}
+
         def fill(parent, items):
             lastgroup = None
-            for m in items:
+            for m in sorted(items, key=lambda x: order.get(x.group, 99)):   # contiguous groups
                 if m.group != lastgroup:
                     gl = Gtk.Label(label=m.group.upper(), xalign=0); gl.add_css_class("filter-group")
                     parent.append(gl); lastgroup = m.group
                 cb = Gtk.CheckButton(label=m.label)
-                if m.core:                       # core metrics are always shown — locked on
-                    cb.set_active(True); cb.set_sensitive(False)
-                    cb.set_tooltip_text("Always shown (core metric)")
-                else:
-                    cb.set_active(self.visible.get(m.id, m.default))
-                    cb.connect("toggled", self._on_filter_toggle, m.id)
-                    self._filter_checks[m.id] = cb
+                cb.set_active(self.visible.get(m.id, False))
+                cb.connect("toggled", self._on_filter_toggle, m.id)
+                self._filter_checks[m.id] = cb
                 parent.append(cb)
-        fill(colA, [m for m in self.metrics if m.section == "metrics"])   # metric groups (core + optional)
+        fill(colA, [m for m in self.metrics if m.section == "metrics"])   # metric groups
         fill(colB, [m for m in self.metrics if m.section == "temps"])     # temperature sensors
         sw = Gtk.ScrolledWindow(vexpand=True)
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -1803,7 +1800,7 @@ class Window(Adw.ApplicationWindow):
         self._persist_filter(); self._refilter()
 
     def _filter_bulk(self, val):
-        for m in self._optional:
+        for m in self.metrics:
             self.visible[m.id] = val
             if m.id in self._filter_checks:
                 self._filter_checks[m.id].set_active(val)
@@ -1988,7 +1985,7 @@ class Window(Adw.ApplicationWindow):
         data["_hottest"] = max((t["c"] for t in data["mains"] + data["vram"]), default=None)
         for m in self.metrics:
             tile = self.tiles.get(m.id)
-            if tile is None or (not m.core and not self.visible.get(m.id)):
+            if tile is None or not self.visible.get(m.id):
                 continue
             try:
                 r = m.compute(data)
