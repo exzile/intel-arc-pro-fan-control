@@ -12,16 +12,20 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 Launch **Arc GPU Dashboard** from your apps menu, or run `xe-gpu-gui`.
 
 ## Dashboard tab
-Live (2 s) metrics in a Windows-style panel of **metric tiles** — **Clock**, **Power draw**,
-**GPU temp**, and **Fan** — each with the big value, a sub-line (e.g. actual clock, throttle reason,
-power cap, fan %/mode), and a **live scrolling sparkline** of recent history. Power draw is derived
-from the GPU's energy counter, and the clock tile shows the throttle reason (thermal / pl1 / …) when
-it's throttling.
+A Windows-style **metric board** — a scrollable grid of live (2 s) **metric tiles** covering
+everything the driver exposes (~29 on a B60): GPU clock, actual clock, min/max clock, **card power
+draw** and **GPU power draw** (derived from the energy counters), power cap/limit, fan speed, fan
+duty %, fan mode, throttle status (with reason: thermal / pl1 / …), power profile, and **every
+temperature sensor** — the four mains (GPU / VRAM / Mem ctrl / PCIe) plus all VRAM channels.
 
-Below that, a **scrollable Temperatures grid** shows every sensor — the four mains
-(pkg / mctrl / pcie / vram) plus all VRAM channels — colour-coded by headroom to each sensor's crit
-limit (a coloured left-border + value: **teal-green** cool, **amber** warm, **red** hot — the old
-hard-to-read blue is gone), with a flame on the hottest.
+Each tile shows a big value, a sub-line, and — for time-series metrics — a **scrolling sparkline**.
+Temperatures colour-grade through a 7-band gradient (**teal-green → amber → red**) by headroom to
+crit, with the whole tile border shifting colour with the heat.
+
+**Metrics filter** (the *Metrics* button, top-right): tick exactly which metrics to show. The
+choice is **saved across launches** (`~/.config/xe-gpu-gui/config.json`) — *All* / *None* /
+*Defaults* buttons included. By default ~12 core metrics are shown and the individual VRAM channels
+are hidden; enable whichever you want.
 
 Fan controls live on the **Fan Control tab**. Power cap, clock limits & power profile live on the
 **Overclock tab** (all performance knobs in one place) — so with the `xe_gt_oc` patch the Dashboard

@@ -5,7 +5,7 @@
 # xe_gt_oc patch exposes .../gt0/oc/vf_curve).
 # Controls call xe-fan-curve / xe-gpu-tune / xe-gpu-oc via pkexec (polkit prompts
 # for writes). Reads are unprivileged sysfs; no kernel poking here.
-import os, glob, subprocess, threading, collections
+import os, glob, subprocess, threading, collections, json
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -37,14 +37,24 @@ CSS = b"""
 .info { opacity:0.45; }
 
 /* --- dashboard metric tiles (Windows-style live panel w/ sparklines) --- */
-.mtile  { background: alpha(@window_fg_color,0.05); border-radius: 12px; padding: 9px 11px; }
+.mtile  { background: alpha(@window_fg_color,0.05); border-radius: 12px; padding: 9px 11px;
+          border: 2px solid alpha(@window_fg_color,0.10);
+          transition: border-color 220ms ease, background 220ms ease; }
+.mtile.tb0{border-color:alpha(#22c3a6,0.6);background:alpha(#22c3a6,0.10);}
+.mtile.tb1{border-color:alpha(#2fd07f,0.6);background:alpha(#2fd07f,0.10);}
+.mtile.tb2{border-color:alpha(#9ad12f,0.6);background:alpha(#9ad12f,0.10);}
+.mtile.tb3{border-color:alpha(#f5c211,0.6);background:alpha(#f5c211,0.11);}
+.mtile.tb4{border-color:alpha(#ff9f45,0.7);background:alpha(#ff9f45,0.12);}
+.mtile.tb5{border-color:alpha(#ff6b3d,0.7);background:alpha(#ff6b3d,0.13);}
+.mtile.tb6{border-color:alpha(#ff4d4d,0.8);background:alpha(#ff4d4d,0.15);}
 .mlabel { font-size:0.70em; font-weight:800; opacity:0.55; letter-spacing:.06em; }
-.mvalue { font-size:1.9em; font-weight:800; }
+.mvalue { font-size:1.7em; font-weight:800; }
 .mvalue.tb0{color:#22c3a6;} .mvalue.tb1{color:#2fd07f;} .mvalue.tb2{color:#9ad12f;}
 .mvalue.tb3{color:#f5c211;} .mvalue.tb4{color:#ff9f45;} .mvalue.tb5{color:#ff6b3d;}
 .mvalue.tb6{color:#ff4d4d;}
 .munit  { opacity:0.50; font-size:0.9em; }
 .msub   { opacity:0.55; font-size:0.76em; }
+.filter-group { font-size:0.72em; font-weight:800; opacity:0.5; letter-spacing:.05em; margin-top:6px; }
 
 /* --- overclock form: aligned rows, icons, animated controls --- */
 .field-icon  { opacity:0.72; }
@@ -130,8 +140,12 @@ class XeGpu:
                 "crit_w": (crit / 1_000_000) if crit else None}
 
     def energy_uj(self):
-        # cumulative energy counter (µJ); the window derives live power draw from its delta
+        # cumulative energy counter (µJ); the window derives live power draw from its delta.
+        # energy1 = whole card, energy2 = GPU package.
         return _int(os.path.join(self.hwmon, "energy1_input")) if self.hwmon else None
+
+    def energy2_uj(self):
+        return _int(os.path.join(self.hwmon, "energy2_input")) if self.hwmon else None
 
     def throttle_reason(self):
         # freq0/throttle/reason_* are 0/1 flags (thermal, pl1/pl2/pl4, prochot, vr_tdc…);
@@ -202,7 +216,8 @@ class XeGpu:
         return {"id": self.identity(), "clocks": self.clocks(), "power": self.power(),
                 "fan": self.fan(), "mains": self.temps_where(False),
                 "vram": self.temps_where(True), "energy": self.energy_uj(),
-                "throttle": self.throttle_reason()}
+                "energy2": self.energy2_uj(), "throttle": self.throttle_reason(),
+                "profile": self.power_profile()}
 
     def read_curve(self):
         pts = []
@@ -294,6 +309,109 @@ def temp_style(c, crit):
 
 SPARK_MAXPTS = 120        # sparkline history capacity — oldest drops as new samples arrive
 
+CONFIG_DIR = os.path.expanduser("~/.config/xe-gpu-gui")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(cfg):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:
+        pass
+
+
+def _num(v):
+    return str(v) if v is not None else "—"
+
+
+def _temp_label(lbl):
+    return {"pkg": "GPU (pkg)", "vram": "VRAM", "mctrl": "Mem ctrl", "pcie": "PCIe"}.get(
+        lbl, "VRAM ch " + lbl.rsplit("_", 1)[-1] if lbl.startswith("vram_ch_") else lbl)
+
+
+class Metric:
+    def __init__(self, mid, label, unit, compute, spark=False, fixed=None, default=True, group="GPU"):
+        self.id = mid; self.label = label; self.unit = unit; self.compute = compute
+        self.spark = spark; self.fixed = fixed; self.default = default; self.group = group
+
+
+def _temp_compute(lbl):
+    def f(d):
+        t = d["temp_by_label"].get(lbl)
+        if not t:
+            return {"text": "—"}
+        st, rgb = temp_style(t["c"], t["crit"])
+        return {"text": str(t["c"]), "val": t["c"], "state": st, "rgb": rgb,
+                "sub": (f"limit {t['crit']}°C" if t.get("crit") else None)}
+    return f
+
+
+def build_metrics(sample):
+    """The full metric registry, derived from one snapshot so the temp sensors/channels
+    are discovered from the actual card. Each compute(data) -> {text, val, state, rgb, sub}."""
+    rp0 = (sample.get("clocks") or {}).get("rp0") or 2400
+    m = [
+        Metric("clock", "GPU clock", "MHz",
+               lambda d: {"text": _num(d["clocks"].get("cur")), "val": d["clocks"].get("cur"),
+                          "sub": (f"act {d['clocks'].get('act')} MHz" if d["clocks"].get("act") else None)},
+               spark=True, fixed=(0, rp0)),
+        Metric("clock_act", "Actual clock", "MHz",
+               lambda d: {"text": _num(d["clocks"].get("act")), "val": d["clocks"].get("act")},
+               spark=True, fixed=(0, rp0)),
+        Metric("clk_min", "Min clock", "MHz",
+               lambda d: {"text": _num(d["clocks"].get("min"))}, default=False),
+        Metric("clk_max", "Max clock", "MHz",
+               lambda d: {"text": _num(d["clocks"].get("max"))}, default=False),
+        Metric("power_card", "Card power", "W",
+               lambda d: {"text": (f"{d['draw_card']:.0f}" if d.get("draw_card") is not None else "—"),
+                          "val": d.get("draw_card"),
+                          "sub": (f"cap {d['power'].get('cap_w')} W" if d["power"].get("cap_w") else None)},
+               spark=True),
+        Metric("power_gpu", "GPU power", "W",
+               lambda d: {"text": (f"{d['draw_pkg']:.0f}" if d.get("draw_pkg") is not None else "—"),
+                          "val": d.get("draw_pkg")}, spark=True),
+        Metric("power_cap", "Power cap", "W",
+               lambda d: {"text": _num(d["power"].get("cap_w"))}, default=False),
+        Metric("power_limit", "Power limit", "W",
+               lambda d: {"text": (f"{d['power']['crit_w']:.0f}" if d["power"].get("crit_w") else "—")},
+               default=False),
+        Metric("fan_rpm", "Fan speed", "rpm",
+               lambda d: {"text": _num(d["fan"].get("rpm")), "val": d["fan"].get("rpm"),
+                          "sub": (f"max {d['fan'].get('max')}" if d["fan"].get("max") else None)},
+               spark=True),
+        Metric("fan_duty", "Fan duty", "%",
+               lambda d: {"text": (str(round((d["fan"].get("duty") or 0) / 255 * 100))
+                                   if d["fan"].get("duty") is not None else "—"),
+                          "val": (round((d["fan"].get("duty") or 0) / 255 * 100)
+                                  if d["fan"].get("duty") is not None else None)},
+               spark=True),
+        Metric("fan_mode", "Fan mode", "",
+               lambda d: {"text": d["fan"].get("mode", "?")}),
+        Metric("throttle", "Throttle", "",
+               lambda d: ({"text": d["throttle"], "state": "tb5", "rgb": _BAND_RGB["tb5"]}
+                          if d.get("throttle") else {"text": "no"})),
+        Metric("profile", "Power profile", "",
+               lambda d: {"text": ((d.get("profile") or {}).get("current") or "—")}, default=False),
+    ]
+    for lbl in [t["label"] for t in sample.get("mains", [])]:
+        m.append(Metric(f"temp_{lbl}", _temp_label(lbl), "°C", _temp_compute(lbl),
+                        spark=(lbl in ("pkg", "vram")), fixed=(20, 110), group="Temperatures"))
+    for lbl in sorted([t["label"] for t in sample.get("vram", [])],
+                      key=lambda x: int(x.rsplit("_", 1)[-1])):
+        m.append(Metric(f"temp_{lbl}", _temp_label(lbl), "°C", _temp_compute(lbl),
+                        fixed=(20, 110), default=False, group="Temperatures"))
+    return m
+
 
 class MetricTile(Gtk.Box):
     """A dashboard metric card: label, big value + unit, a sub-line, and a live
@@ -327,9 +445,9 @@ class MetricTile(Gtk.Box):
         if rgb is not None:
             self._rgb = rgb
         for cc in BAND_CLASSES:
-            self.val.remove_css_class(cc)
+            self.val.remove_css_class(cc); self.remove_css_class(cc)
         if state:
-            self.val.add_css_class(state)
+            self.val.add_css_class(state); self.add_css_class(state)
         if sub is not None:
             self.sub.set_text(sub); self.sub.set_visible(bool(sub))
         if spark_val is not None and self.area is not None:
@@ -1524,13 +1642,7 @@ class Window(Adw.ApplicationWindow):
                                   "none", "No GPU")
             return
 
-        dash = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
-                       margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
-        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12); left.set_size_request(330, -1)
-        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True)
-        dash.append(left); dash.append(right)
-        self._build_stats(left); self._build_controls(left); self._build_temps(right)
-        p1 = self.stack.add_titled(dash, "dash", "Dashboard")
+        p1 = self.stack.add_titled(self._build_dashboard(), "dash", "Dashboard")
         p1.set_icon_name("utilities-system-monitor-symbolic")
 
         self.editor = CurveEditor(self.gpu, self)
@@ -1550,7 +1662,6 @@ class Window(Adw.ApplicationWindow):
             p3 = self.stack.add_titled(oc_wrap, "oc", "Overclock")
             p3.set_icon_name("power-profile-performance-symbolic")
 
-        self.tcache = {}          # label -> °C
         self._reading = False
         self._tick()              # first async snapshot
         GLib.timeout_add_seconds(REFRESH_SECONDS, self._tick)
@@ -1561,21 +1672,88 @@ class Window(Adw.ApplicationWindow):
         self.toasts.add_toast(t)
         GLib.timeout_add(ms, lambda: (t.dismiss(), False)[1])
 
-    def _build_stats(self, parent):
-        c = card("GPU", "Live readings — Intel Arc (xe) driver via sysfs.")
-        self.v_id = Gtk.Label(xalign=0); self.v_id.add_css_class("dim"); self.v_id.set_wrap(True)
-        c.append(self.v_id)
-        g = Gtk.Grid(column_spacing=10, row_spacing=10, column_homogeneous=True)
-        cl = self.gpu.clocks()
-        self.m_clock = MetricTile("Clock", "MHz", fixed=(0, cl.get("rp0") or 2400))
-        self.m_power = MetricTile("Power draw", "W")
-        self.m_temp = MetricTile("GPU temp", "°C", fixed=(20, 100))
-        self.m_fan = MetricTile("Fan", "rpm")
-        for i, t in enumerate((self.m_clock, self.m_power, self.m_temp, self.m_fan)):
-            g.attach(t, i % 2, i // 2, 1, 1)
-        c.append(g)
-        self._energy_prev = None
-        parent.append(c)
+    def _build_dashboard(self):
+        sample = self.gpu.snapshot()
+        self.metrics = build_metrics(sample)
+        saved = load_config().get("metrics", {})
+        self.visible = {m.id: bool(saved.get(m.id, m.default)) for m in self.metrics}
+        self.tiles = {}
+        self._energy_prev = {}
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                        margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
+        head = Gtk.Box(spacing=8)
+        title = Gtk.Label(label="LIVE METRICS", xalign=0, hexpand=True); title.add_css_class("section")
+        head.append(title)
+        head.append(self._build_filter_button())
+        outer.append(head)
+        self.flow = Gtk.FlowBox(column_spacing=10, row_spacing=10, homogeneous=True,
+                                min_children_per_line=2, max_children_per_line=5,
+                                selection_mode=Gtk.SelectionMode.NONE)
+        self.flow.set_filter_func(self._metric_visible)
+        for m in self.metrics:
+            tile = MetricTile(m.label, m.unit, spark=m.spark, fixed=m.fixed)
+            tile.metric_id = m.id
+            self.tiles[m.id] = tile
+            self.flow.append(tile)
+        sw = Gtk.ScrolledWindow(vexpand=True)
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.set_child(self.flow)
+        outer.append(sw)
+        self._build_controls(outer)          # power/clock card only when there's no Overclock tab
+        return outer
+
+    def _metric_visible(self, child):
+        return self.visible.get(getattr(child.get_child(), "metric_id", None), True)
+
+    def _build_filter_button(self):
+        btn = Gtk.MenuButton(tooltip_text="Choose which metrics to show (saved across launches)")
+        btn.set_child(Adw.ButtonContent(icon_name="view-list-symbolic", label="Metrics"))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
+                      margin_start=8, margin_end=8, margin_top=8, margin_bottom=8)
+        row = Gtk.Box(spacing=6)
+        row.append(icon_button("edit-select-all-symbolic", "Show all metrics",
+                               lambda *_: self._filter_bulk(True), label="All"))
+        row.append(icon_button("edit-clear-all-symbolic", "Hide all metrics",
+                               lambda *_: self._filter_bulk(False), label="None"))
+        row.append(icon_button("view-refresh-symbolic", "Reset to the default selection",
+                               lambda *_: self._filter_reset(), label="Defaults"))
+        box.append(row)
+        self._filter_checks = {}
+        lastgroup = None
+        for m in self.metrics:
+            if m.group != lastgroup:
+                gl = Gtk.Label(label=m.group.upper(), xalign=0); gl.add_css_class("filter-group")
+                box.append(gl); lastgroup = m.group
+            cb = Gtk.CheckButton(label=m.label)
+            cb.set_active(self.visible.get(m.id, m.default))
+            cb.connect("toggled", self._on_filter_toggle, m.id)
+            self._filter_checks[m.id] = cb
+            box.append(cb)
+        fsw = Gtk.ScrolledWindow(propagate_natural_width=True)
+        fsw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        fsw.set_max_content_height(460); fsw.set_child(box)
+        pop = Gtk.Popover(); pop.set_child(fsw)
+        btn.set_popover(pop)
+        return btn
+
+    def _on_filter_toggle(self, cb, mid):
+        self.visible[mid] = cb.get_active()
+        self._persist_filter(); self.flow.invalidate_filter()
+
+    def _filter_bulk(self, val):
+        for m in self.metrics:
+            self.visible[m.id] = val
+            self._filter_checks[m.id].set_active(val)
+        self._persist_filter(); self.flow.invalidate_filter()
+
+    def _filter_reset(self):
+        for m in self.metrics:
+            self.visible[m.id] = m.default
+            self._filter_checks[m.id].set_active(m.default)
+        self._persist_filter(); self.flow.invalidate_filter()
+
+    def _persist_filter(self):
+        cfg = load_config(); cfg["metrics"] = self.visible; save_config(cfg)
 
     def _build_controls(self, parent):
         # Power/clocks/profile live here ONLY when there's no Overclock tab (no xe_gt_oc
@@ -1644,32 +1822,6 @@ class Window(Adw.ApplicationWindow):
         self.tune_base = self._tune_vals()
         self._mark_tune()
 
-    def _build_temps(self, parent):
-        c = card("Temperatures", "All sensors the driver exposes. Colour = headroom to the crit limit.")
-        c.set_vexpand(True)
-        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        self.main_t = {}
-        mg = Gtk.Grid(column_spacing=8, row_spacing=8, column_homogeneous=True)
-        for i, name in enumerate(("pkg", "mctrl", "pcie", "vram")):
-            cell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2); cell.add_css_class("chip")
-            lab = Gtk.Label(label=name, xalign=0); lab.add_css_class("clbl")
-            val = Gtk.Label(label="—", xalign=0); val.add_css_class("big")
-            bar = Gtk.LevelBar(min_value=0, max_value=110, hexpand=True)
-            cell.append(lab); cell.append(val); cell.append(bar)
-            mg.attach(cell, i % 2, i // 2, 1, 1)
-            self.main_t[name] = (cell, val, bar)
-        inner.append(mg)
-        vh = Gtk.Label(label="VRAM CHANNELS", xalign=0); vh.add_css_class("section"); vh.set_margin_top(2)
-        inner.append(vh)
-        self.vram_chips = {}
-        self.vram_grid = Gtk.Grid(column_spacing=6, row_spacing=6, column_homogeneous=True)
-        inner.append(self.vram_grid)
-        # scrollable so all VRAM channels fit no matter how many the card exposes
-        sw = Gtk.ScrolledWindow(vexpand=True)
-        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        sw.set_child(inner)
-        c.append(sw); parent.append(c)
-
     def _spin(self, lo, hi, step, val):
         s = Gtk.SpinButton(adjustment=Gtk.Adjustment(lower=lo, upper=hi, step_increment=step,
                                                      value=val), valign=Gtk.Align.CENTER)
@@ -1720,13 +1872,13 @@ class Window(Adw.ApplicationWindow):
         threading.Thread(target=work, daemon=True).start()
         return True
 
-    def _power_draw(self, energy_uj):
-        # derive live watts from the cumulative energy counter's delta over wall time
+    def _power_draw(self, key, energy_uj):
+        # live watts from the cumulative energy counter's delta over wall time (per rail)
         if energy_uj is None:
             return None
         now = GLib.get_monotonic_time()          # µs
-        prev = self._energy_prev
-        self._energy_prev = (energy_uj, now)
+        prev = self._energy_prev.get(key)
+        self._energy_prev[key] = (energy_uj, now)
         if prev is None:
             return None
         de = energy_uj - prev[0]; dt = (now - prev[1]) / 1e6
@@ -1738,64 +1890,26 @@ class Window(Adw.ApplicationWindow):
         self._reading = False
         if not data:
             return False
-        ident = data["id"]
-        self.v_id.set_markup(f"<b>{ident['card']}</b>  <span alpha='55%'>{ident['pci']} · "
-                             f"{ident['id']}</span>")
-        cl = data["clocks"]
-        cur, act = cl.get("cur"), cl.get("act")
-        thr = f" · throttling: {data['throttle']}" if data.get("throttle") else ""
-        csub = f"{cl.get('min','?')}–{cl.get('max','?')} MHz{thr}"
-        if act:
-            csub = f"act {act} · " + csub
-        self.m_clock.update(str(cur) if cur is not None else "—", spark_val=cur,
-                            rgb=(0.28, 0.56, 0.95), sub=csub)
-        pw = data["power"]; cap = pw.get("cap_w")
-        watts = self._power_draw(data.get("energy"))
-        if watts is not None:
-            self.m_power.update(f"{watts:.0f}", spark_val=watts, rgb=(0.72, 0.45, 0.96),
-                                sub=(f"cap {cap} W" if cap else None))
-        else:
-            self.m_power.update(str(cap) if cap else "—", rgb=(0.72, 0.45, 0.96),
-                                sub="cap (W) — reading draw…")
-        mains = {t["label"]: t for t in data["mains"]}
-        for t in data["mains"] + data["vram"]:
-            self.tcache[t["label"]] = t["c"]
-        if "pkg" in mains:
-            self.editor.cur_pkg = mains["pkg"]["c"]
-        pkg = mains.get("pkg")
+        # derived fields the metric compute() closures read
+        data["draw_card"] = self._power_draw("card", data.get("energy"))
+        data["draw_pkg"] = self._power_draw("pkg", data.get("energy2"))
+        data["temp_by_label"] = {t["label"]: t for t in data["mains"] + data["vram"]}
+        pkg = data["temp_by_label"].get("pkg")
         if pkg:
-            st, srgb = temp_style(pkg["c"], pkg["crit"])
-            self.m_temp.update(str(pkg["c"]), spark_val=pkg["c"], rgb=srgb, state=st,
-                               sub=(f"limit {pkg['crit']}°C" if pkg.get("crit") else None))
-        fn = data["fan"]; rpm = fn.get("rpm"); duty = fn.get("duty")
-        dpct = round((duty or 0) / 255 * 100) if duty is not None else None
-        fsub = fn.get("mode", "?") if dpct is None else f"{dpct}% · {fn.get('mode','?')}"
-        self.m_fan.update(str(rpm) if rpm is not None else "—", spark_val=rpm,
-                          rgb=(0.16, 0.74, 0.62), sub=fsub)
+            self.editor.cur_pkg = pkg["c"]
         if getattr(self, "oc_view", None) is not None:
-            self.oc_view.set_telemetry(cur, pkg["c"] if pkg else None, rpm)
-        hottest = max(self.tcache.values(), default=None)
-        for name, (cell, val, bar) in self.main_t.items():
-            t = mains.get(name)
-            if not t:
-                val.set_text("—"); continue
-            val.set_text(f"{t['c']}°{' 🔥' if t['c'] == hottest else ''}")
-            bar.set_max_value(t["crit"] or 110); bar.set_value(min(t["c"], t["crit"] or 110))
-            st, _ = temp_style(t["c"], t["crit"])
-            self._tc(cell, st); self._tc(val, st)
-        for i, t in enumerate(sorted(data["vram"], key=lambda x: int(x["label"].rsplit("_", 1)[-1]))):
-            key = t["label"]
-            if key not in self.vram_chips:
-                chip = Gtk.Box(orientation=Gtk.Orientation.VERTICAL); chip.add_css_class("chip")
-                cl_ = Gtk.Label(label="ch" + key.rsplit("_", 1)[-1], xalign=0.5); cl_.add_css_class("clbl")
-                cv = Gtk.Label(xalign=0.5); cv.add_css_class("cval")
-                chip.append(cl_); chip.append(cv)
-                self.vram_grid.attach(chip, i % 4, i // 4, 1, 1)
-                self.vram_chips[key] = (chip, cv)
-            chip, cv = self.vram_chips[key]
-            cv.set_text(f"{t['c']}°{' 🔥' if t['c'] == hottest else ''}")
-            st, _ = temp_style(t["c"], t["crit"])
-            self._tc(chip, st)
+            self.oc_view.set_telemetry(data["clocks"].get("cur"), pkg["c"] if pkg else None,
+                                       data["fan"].get("rpm"))
+        for m in self.metrics:
+            tile = self.tiles.get(m.id)
+            if tile is None:
+                continue
+            try:
+                r = m.compute(data)
+            except Exception:
+                r = {"text": "—"}
+            tile.update(r.get("text", "—"), spark_val=(r.get("val") if m.spark else None),
+                        rgb=r.get("rgb"), state=r.get("state"), sub=r.get("sub"))
         return False
 
 
