@@ -27,6 +27,32 @@ CSS = b"""
 .t-warm { color:#e5a50a; } .chip.t-warm{ background:alpha(#e5a50a,0.16);}
 .t-hot  { color:#e01b24; } .chip.t-hot { background:alpha(#e01b24,0.18);}
 .info { opacity:0.45; }
+
+/* --- overclock form: aligned rows, icons, animated controls --- */
+.field-icon  { opacity:0.72; }
+.field-label { min-width: 118px; }
+.field-unit  { opacity:0.55; font-size:0.86em; }
+.field-changed { color:@accent_color; font-weight:800; }
+.field-uv { color:#2ec27e; font-weight:800; }   /* undervolt: green */
+.field-ov { color:#e5a50a; font-weight:800; }   /* overvolt: amber */
+.field-hot { color:#e01b24; font-weight:800; }  /* raised temp/limit: red */
+.field-spin  { transition: box-shadow 160ms ease; }
+.mode-row    { padding: 2px 2px 4px 2px; }
+
+.oc-scale trough    { min-height:6px; border-radius:6px; transition: background 180ms ease; }
+.oc-scale highlight { border-radius:6px; transition: background 180ms ease; }
+.oc-scale:hover highlight { background:@accent_color; }
+.oc-scale slider    { transition: transform 120ms ease, box-shadow 160ms ease; }
+.oc-scale:hover slider { transform: scale(1.14); box-shadow: 0 0 0 4px alpha(@accent_color,0.18); }
+
+.oc-page { animation: ocfade 280ms ease; }
+@keyframes ocfade { from { opacity:0; } to { opacity:1; } }
+
+button.suggested-action.pulse { animation: ocpulse 1.6s ease-in-out infinite; }
+@keyframes ocpulse {
+  0%,100% { box-shadow: 0 0 0 0 alpha(@accent_color,0.55); }
+  50%     { box-shadow: 0 0 0 6px alpha(@accent_color,0.0); }
+}
 """
 
 
@@ -228,7 +254,8 @@ def tclass(c, crit):
 
 HELPER_PATHS = {"xe-fan-curve": "/usr/local/bin/xe-fan-curve",
                 "xe-gpu-tune": "/usr/local/bin/xe-gpu-tune",
-                "xe-gpu-oc": "/usr/local/bin/xe-gpu-oc"}
+                "xe-gpu-oc": "/usr/local/bin/xe-gpu-oc",
+                "xe-gpu-stress": "/usr/local/bin/xe-gpu-stress"}
 
 
 def run_priv(args, parent, after=None):
@@ -559,103 +586,235 @@ class CurveEditor(Gtk.Box):
 
 # ---------------------------------------------------------------- overclock
 VMIN_MV, VMAX_MV = 400, 1200      # OC voltage clamp (matches xe-gpu-oc / xe_gt_oc)
+STRESS_SECS = 60                  # stability-test load duration
+
+# Overclock preset profiles (offset-based, conservative). Each loads the sliders
+# (offset mode) — nothing is written until you press Apply. mem/temp only apply if
+# the card exposes them. Voltage is always clamped monotonic + to the voltage limit.
+OC_PRESETS = {
+    "Stock":       dict(off=0,   vlim=1200, temp=100, mem=19.0),
+    "Efficient":   dict(off=-50, vlim=1050, temp=85,  mem=19.0),   # undervolt, cool/quiet
+    "Balanced":    dict(off=-25, vlim=1100, temp=95,  mem=19.0),   # mild undervolt
+    "Performance": dict(off=25,  vlim=1200, temp=100, mem=20.0),   # slight overvolt + faster VRAM
+}
+
+
+def volt_color(delta):
+    """Curve colour by voltage delta vs stock: green undervolt → blue neutral →
+    amber → red as overvolt grows. Returns an (r, g, b) tuple in 0..1."""
+    if delta <= -6:
+        return (0.16, 0.70, 0.42)      # undervolt — green
+    if delta >= 45:
+        return (0.88, 0.16, 0.16)      # heavy overvolt — red
+    if delta >= 6:
+        return (0.92, 0.60, 0.10)      # overvolt — amber
+    return (0.21, 0.52, 0.89)          # neutral — accent blue
+
+
+class SliderField:
+    """One aligned form row: [icon] [label] [====slider====] [spin] [unit].
+    The slider and spin share a single Adjustment, so they stay in sync for free."""
+    def __init__(self, grid, row, icon, label, lo, hi, step, value, unit,
+                 digits=0, tip=None, on_change=None):
+        self.adj = Gtk.Adjustment(lower=lo, upper=hi, step_increment=step,
+                                  page_increment=step * 5, value=value)
+        img = Gtk.Image(icon_name=icon); img.add_css_class("field-icon")
+        self.label = Gtk.Label(label=label, xalign=0); self.label.add_css_class("field-label")
+        if tip:
+            self.label.set_tooltip_text(tip); img.set_tooltip_text(tip)
+        self.scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL,
+                               adjustment=self.adj, hexpand=True, draw_value=False)
+        self.scale.add_css_class("oc-scale")
+        self.spin = Gtk.SpinButton(adjustment=self.adj, digits=digits, valign=Gtk.Align.CENTER)
+        self.spin.set_numeric(True); self.spin.add_css_class("field-spin")
+        unit_l = Gtk.Label(label=unit, xalign=0); unit_l.add_css_class("field-unit")
+        for col, wdg in enumerate((img, self.label, self.scale, self.spin, unit_l)):
+            grid.attach(wdg, col, row, 1, 1)
+        if on_change:
+            self.adj.connect("value-changed", lambda *_: on_change())
+
+    @property
+    def value(self):
+        return self.adj.get_value()
+
+    @value.setter
+    def value(self, v):
+        self.adj.set_value(v)
+
+    def set_enabled(self, on):
+        self.scale.set_sensitive(on); self.spin.set_sensitive(on)
+        self.label.set_opacity(1.0 if on else 0.45)
+
+    def mark(self, changed):
+        (self.label.add_css_class if changed else self.label.remove_css_class)("field-changed")
 
 
 class VoltageCurveView(Gtk.Box):
-    """Voltage-frequency curve viewer + bulk voltage-offset control (needs xe_gt_oc)."""
+    """VF-curve editor with two modes — a uniform voltage *offset*, or a per-point
+    *curve* shaped by dragging anchor nodes — plus voltage-limit, power, memory and
+    temperature slider/spin rows. Needs the xe_gt_oc patch (oc/vf_curve)."""
+
     def __init__(self, gpu, window):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self.add_css_class("oc-page")
         self.gpu = gpu
         self.window = window
-        self.stock = []          # baseline curve (mV per point), applied-offset removed
-        self.offset = 0          # slider value (mV) to preview / apply
-        self.applied = 0         # offset currently on the GPU (tracked by this view)
+        self.stock = []            # baseline curve (mV per point), applied offset removed
+        self.applied = 0           # uniform offset currently on the GPU
+        self.applied_curve = None  # custom curve live on the GPU (list mV) or None
+        self.mode = "offset"       # "offset" | "curve"
+        self.anchor_i = []         # anchor indices into the 85-point curve
+        self.anchor_off = []       # per-anchor offset (mV), curve mode
+        self._tgt = []             # cached monotonic target curve (mV per point)
+        self._drag = None
         self._loading = True
 
+        # --- graph ---
         self.area = Gtk.DrawingArea(hexpand=True, vexpand=True)
-        self.area.set_size_request(560, 300)
+        self.area.set_size_request(560, 270)
         self.area.set_draw_func(self._draw)
         frame = Gtk.Frame(); frame.add_css_class("card2"); frame.set_child(self.area)
         self.append(frame)
+        drag = Gtk.GestureDrag()
+        drag.connect("drag-begin", self._on_begin)
+        drag.connect("drag-update", self._on_update)
+        drag.connect("drag-end", lambda *_: setattr(self, "_drag", None))
+        self.area.add_controller(drag)
 
-        row = Gtk.Box(spacing=10)
-        lab = Gtk.Label(label="Voltage offset", xalign=0); lab.add_css_class("section")
-        row.append(lab)
-        self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, -100, 100, 5)
-        self.scale.set_hexpand(True)
-        self.scale.set_draw_value(True)
-        self.scale.set_value_pos(Gtk.PositionType.RIGHT)
-        self.scale.add_mark(0, Gtk.PositionType.BOTTOM, None)
-        self.scale.connect("value-changed", self._on_slide)
-        row.append(self.scale)
-        row.append(Gtk.Label(label="mV"))
-        self.append(row)
+        # --- mode toggle ---
+        moderow = Gtk.Box(spacing=10); moderow.add_css_class("mode-row")
+        micon = Gtk.Image(icon_name="power-profile-balanced-symbolic"); micon.add_css_class("field-icon")
+        moderow.append(micon)
+        mlbl = Gtk.Label(label="Adjustment mode", xalign=0); mlbl.add_css_class("field-label")
+        moderow.append(mlbl)
+        self.chk_curve = Gtk.CheckButton(label="Per-point curve (drag the nodes)")
+        self.chk_curve.set_tooltip_text(
+            "Off: shift the whole curve by one uniform voltage offset.\n"
+            "On: shape the curve — drag the anchor nodes to set the voltage at each "
+            "frequency region independently (a full custom VF curve).")
+        self.chk_curve.connect("toggled", self._on_mode)
+        moderow.append(self.chk_curve)
+        spacer = Gtk.Box(hexpand=True); moderow.append(spacer)
+        picon = Gtk.Image(icon_name="starred-symbolic"); picon.add_css_class("field-icon")
+        moderow.append(picon)
+        self.preset = Gtk.DropDown.new_from_strings(["Preset…"] + list(OC_PRESETS))
+        self.preset.set_tooltip_text("Load a conservative overclock profile into the sliders "
+                                     "(offset mode). Nothing is written until you press Apply.")
+        self.preset.connect("notify::selected", self._on_preset)
+        moderow.append(self.preset)
+        self.append(moderow)
 
-        # VRAM memory speed (only if the patch exposes oc/mem_speed)
-        self.mem_spin = None
-        self.mem_applied = 0
+        # --- aligned form grid ---
+        grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        self.f_off = SliderField(
+            grid, 0, "power-profile-power-saver-symbolic", "Voltage offset",
+            -150, 150, 5, 0, "mV",
+            tip="Shift every point of the VF curve. −mV undervolts (cooler, more efficient); "
+                "+mV overvolts (headroom for higher clocks).",
+            on_change=self._on_off)
+        self.f_vlim = SliderField(
+            grid, 1, "security-high-symbolic", "Voltage limit",
+            800, VMAX_MV, 10, VMAX_MV, "mV",
+            tip="Ceiling for the curve's peak voltage — the applied curve is clamped here. "
+                "A safety cap on how high voltage may go.",
+            on_change=self._on_knob)
+        r = 2
+        self.f_pow = None
+        cap0 = self.gpu.power().get("cap_w")
+        if cap0:
+            self.pow_applied = int(cap0)
+            self.f_pow = SliderField(
+                grid, r, "power-profile-performance-symbolic", "Power limit",
+                50, 400, 5, cap0, "W",
+                tip="Board power cap (TDP). Higher sustains boost clocks longer; lower runs "
+                    "cooler/quieter.", on_change=self._on_knob)
+            r += 1
+        self.f_mem = None
         if self.gpu.mem_available:
-            mrow = Gtk.Box(spacing=10)
-            mlab = Gtk.Label(label="Memory speed", xalign=0); mlab.add_css_class("section")
-            mrow.append(mlab)
-            self.mem_spin = Gtk.SpinButton(
-                adjustment=Gtk.Adjustment(lower=14.0, upper=24.0, step_increment=0.1, value=19.0),
-                digits=2, valign=Gtk.Align.CENTER)
-            self.mem_spin.set_numeric(True)
-            self.mem_spin.set_tooltip_text("GDDR6 memory data rate (Gbps). Higher = more VRAM bandwidth; "
-                                           "raise cautiously.")
-            self.mem_spin.connect("value-changed", lambda *_: (self._hint(), self._mark()))
-            mrow.append(self.mem_spin)
-            mrow.append(Gtk.Label(label="Gbps"))
-            self.append(mrow)
-
-        # GPU temperature (throttle) limit
-        self.temp_spin = None
-        self.temp_applied = 100
+            self.mem_applied = 19000
+            self.f_mem = SliderField(
+                grid, r, "drive-harddisk-symbolic", "Memory speed",
+                14.0, 24.0, 0.1, 19.0, "Gbps", digits=2,
+                tip="GDDR6 data rate. Higher = more VRAM bandwidth; raise cautiously.",
+                on_change=self._on_knob)
+            r += 1
+        self.f_temp = None
         if self.gpu.temp_available:
-            trow = Gtk.Box(spacing=10)
-            tlab = Gtk.Label(label="Temp limit", xalign=0); tlab.add_css_class("section")
-            trow.append(tlab)
-            self.temp_spin = Gtk.SpinButton(
-                adjustment=Gtk.Adjustment(lower=60, upper=100, step_increment=1, value=100),
-                valign=Gtk.Align.CENTER)
-            self.temp_spin.set_numeric(True)
-            self.temp_spin.set_tooltip_text("GPU thermal-throttle target (°C). Higher = the GPU runs "
-                                            "hotter before throttling (more sustained clock); lower = "
-                                            "cooler/quieter.")
-            self.temp_spin.connect("value-changed", lambda *_: self._mark())
-            trow.append(self.temp_spin)
-            trow.append(Gtk.Label(label="°C"))
-            self.append(trow)
+            self.temp_applied = 100
+            self.f_temp = SliderField(
+                grid, r, "dialog-warning-symbolic", "Temp limit",
+                60, 100, 1, 100, "°C",
+                tip="Thermal-throttle target. Higher = more sustained clock before throttling; "
+                    "lower = cooler/quieter.", on_change=self._on_knob)
+            r += 1
+        self.append(grid)
 
+        # --- action bar ---
         bar = Gtk.Box(spacing=8)
         self.hint = Gtk.Label(xalign=0, hexpand=True); self.hint.add_css_class("dim")
         bar.append(self.hint)
-        bar.append(icon_button("view-refresh-symbolic", "Re-read the curve from the GPU",
+        self._testing = False
+        self.test_btn = icon_button(
+            "media-playback-start-symbolic",
+            f"Run a {STRESS_SECS}s GPU load and watch for instability / throttling "
+            "(auto-reverts to stock if it hangs)", self._stress, label="Test")
+        bar.append(self.test_btn)
+        bar.append(icon_button("view-refresh-symbolic", "Re-read everything from the GPU",
                                lambda *_: self._load(), label="Reload"))
-        bar.append(icon_button("edit-undo-symbolic", "Restore the stock voltage curve",
+        bar.append(icon_button("edit-undo-symbolic", "Restore stock curve + memory + temp",
                                self._reset, label="Reset"))
         self.apply_btn = icon_button("emblem-ok-symbolic",
-                                     "Apply the voltage offset — asks for authorization",
+                                     "Apply changed settings — asks for authorization",
                                      self._apply, label="Apply", css="suggested-action")
         bar.append(self.apply_btn)
         self.append(bar)
 
         note = Gtk.Label(
-            label="The GPU voltage-frequency curve — X = frequency step (idle → max), Y = voltage. "
-                  "Slide left to undervolt (−mV: cooler, more efficient) or right to overvolt "
-                  "(+mV: headroom for higher clocks). Memory speed sets the GDDR6 data rate (Gbps). "
-                  "Apply saves your choice (re-applied at boot); Reset restores stock.",
+            label="X = frequency step (idle → max), Y = voltage. Dashed = stock, solid = your "
+                  "preview. In curve mode drag the round nodes to shape voltage per region; the "
+                  "red line marks your voltage limit. Apply saves your choice (re-applied at boot).",
             xalign=0, wrap=True)
         note.add_css_class("dim")
         self.append(note)
         self._load()
 
+    # ---- mode ----
+    def _on_mode(self, chk):
+        self.mode = "curve" if chk.get_active() else "offset"
+        if self.mode == "curve":
+            base = int(self.f_off.value)          # seed anchors from the uniform offset
+            self.anchor_off = [base for _ in self.anchor_i]
+        self.f_off.set_enabled(self.mode == "offset")
+        self._hint(); self.area.queue_draw(); self._mark()
+
+    def _on_preset(self, dd, _):
+        i = dd.get_selected()
+        if i <= 0:
+            return
+        name = list(OC_PRESETS)[i - 1]
+        p = OC_PRESETS[name]
+        if self.chk_curve.get_active():          # presets are offset-based
+            self.chk_curve.set_active(False)     # -> _on_mode sets mode + enables offset
+        self.f_vlim.value = p["vlim"]
+        self.f_off.value = p["off"]
+        if self.f_temp is not None:
+            self.f_temp.value = p["temp"]
+        if self.f_mem is not None:
+            self.f_mem.value = p["mem"]
+        dd.set_selected(0)
+        self._hint(); self.area.queue_draw(); self._mark()
+        self.window.toast(f"Loaded “{name}” profile — press Apply to write it")
+
+    def _on_off(self):
+        self._hint(); self.area.queue_draw(); self._mark()
+
+    def _on_knob(self):
+        self._hint(); self.area.queue_draw(); self._mark()
+
     # ---- data ----
     def _load(self, *_):
         self._loading = True
-        self.hint.set_text("reading curve…")
-        self.area.queue_draw()
+        self.hint.set_text("reading…"); self.area.queue_draw()
 
         def work():
             data = self.gpu.read_vf_curve()
@@ -664,66 +823,171 @@ class VoltageCurveView(Gtk.Box):
 
     def _loaded(self, data):
         self._loading = False
-        # restore the persisted last choice so we show it (not stock) on load
-        off = self.gpu.oc_offset()
+        off = self.gpu.oc_offset()               # int = uniform offset, None = custom curve
         self.applied = off if isinstance(off, int) else 0
         if data:
-            # the live curve already includes self.applied; baseline = live − applied
-            self.stock = [v - self.applied for v in data]
-        self.scale.set_value(self.applied)
-        self.offset = self.applied
-        if self.mem_spin is not None:
+            self.anchor_i = self._anchors(len(data))
+            if isinstance(off, int):
+                self.stock = [v - self.applied for v in data]   # baseline = live − offset
+                self.applied_curve = None
+                self.mode = "offset"
+                self.chk_curve.set_active(False)
+                self.anchor_off = [self.applied for _ in self.anchor_i]
+            else:
+                # a custom curve is live; take it as the shown baseline (flat anchors)
+                self.stock = list(data)
+                self.applied_curve = list(data)
+                self.mode = "curve"
+                self.chk_curve.set_active(True)
+                self.anchor_off = [0 for _ in self.anchor_i]
+            self.f_off.value = self.applied
+            self.f_off.set_enabled(self.mode == "offset")
+        if self.f_mem is not None:
             mbps = self.gpu.read_mem_speed()
             if mbps:
-                self.mem_applied = mbps
-                self.mem_spin.set_value(mbps / 1000.0)
-        if self.temp_spin is not None:
+                self.mem_applied = mbps; self.f_mem.value = mbps / 1000.0
+        if self.f_temp is not None:
             degc = self.gpu.read_temp_limit()
             if degc:
-                self.temp_applied = degc
-                self.temp_spin.set_value(degc)
+                self.temp_applied = degc; self.f_temp.value = degc
+        if self.f_pow is not None:
+            cap = self.gpu.power().get("cap_w")
+            if cap:
+                self.pow_applied = int(cap); self.f_pow.value = cap
         self._hint(); self.area.queue_draw(); self._mark()
         return False
 
+    def _anchors(self, n):
+        k = min(8, max(2, n - 1))
+        return sorted({round(i * (n - 1) / k) for i in range(k + 1)})
+
+    # ---- curve math ----
+    def _off_at(self, i):
+        if self.mode == "offset":
+            return self.f_off.value
+        xs, ys = self.anchor_i, self.anchor_off
+        if not xs:
+            return 0
+        if i <= xs[0]:
+            return ys[0]
+        if i >= xs[-1]:
+            return ys[-1]
+        for a in range(len(xs) - 1):
+            if xs[a] <= i <= xs[a + 1]:
+                t = (i - xs[a]) / max(xs[a + 1] - xs[a], 1)
+                return ys[a] + t * (ys[a + 1] - ys[a])
+        return 0
+
+    def _vlim(self):
+        return int(self.f_vlim.value)
+
+    def _recompute(self):
+        # Build the monotonic (non-decreasing) target curve the hardware will accept.
+        # Voltage rises with frequency; PCODE pins any point that dips below its
+        # predecessor (and the top points sit on the fixed Vmax rail), so mirror that
+        # here — an honest preview of exactly what Apply will land.
+        tgt, prev, vlim = [], VMIN_MV, self._vlim()
+        for i in range(len(self.stock)):
+            v = max(VMIN_MV, min(vlim, self.stock[i] + self._off_at(i)))
+            v = max(v, prev)
+            tgt.append(int(round(v))); prev = v
+        self._tgt = tgt
+
+    def _preview(self, i):
+        if not self._tgt:
+            self._recompute()
+        return self._tgt[i] if i < len(self._tgt) else int(self.stock[i])
+
+    def _applied_curve(self):
+        n = len(self.stock)
+        if self.applied_curve is not None:
+            return [int(self.applied_curve[i]) if i < len(self.applied_curve)
+                    else int(self.stock[i]) for i in range(n)]
+        return [max(VMIN_MV, min(VMAX_MV, int(self.stock[i] + self.applied))) for i in range(n)]
+
+    def _target_curve(self):
+        if not self._tgt:
+            self._recompute()
+        return list(self._tgt)
+
+    def _vf_changed(self):
+        return bool(self.stock) and self._target_curve() != self._applied_curve()
+
+    # ---- hint / pending state ----
     def _hint(self):
         if not self.stock:
-            self.hint.set_text("")
-            return
-        lo = min(self.stock) + int(self.offset)
-        hi = max(self.stock) + int(self.offset)
-        self.hint.set_text(f"{len(self.stock)} points · {lo}–{hi} mV"
-                           + (f"  (offset {'+' if self.offset > 0 else ''}{int(self.offset)} mV)"
-                              if self.offset else ""))
+            self.hint.set_text(""); return
+        self._recompute()
+        tgt = self._target_curve()
+        extra = ""
+        if self.mode == "offset" and int(self.f_off.value):
+            o = int(self.f_off.value); extra = f"  ({'+' if o > 0 else ''}{o} mV)"
+        self.hint.set_text(f"{len(tgt)} pts · {min(tgt)}–{max(tgt)} mV · {self.mode}{extra}")
 
     def _mark(self):
-        changed = int(self.offset) != int(self.applied)
-        if self.mem_spin is not None:
-            changed = changed or int(self.mem_spin.get_value() * 1000) != int(self.mem_applied)
-        if self.temp_spin is not None:
-            changed = changed or int(self.temp_spin.get_value()) != int(self.temp_applied)
+        changed = self._vf_changed()
+        if self.f_pow is not None:
+            changed |= int(self.f_pow.value) != int(self.pow_applied)
+        if self.f_mem is not None:
+            changed |= int(self.f_mem.value * 1000) != int(self.mem_applied)
+        if self.f_temp is not None:
+            changed |= int(self.f_temp.value) != int(self.temp_applied)
+        # voltage offset: semantic colour (green undervolt / amber overvolt)
+        lbl = self.f_off.label
+        for c in ("field-changed", "field-uv", "field-ov"):
+            lbl.remove_css_class(c)
+        if self.mode == "offset" and int(self.f_off.value) != int(self.applied):
+            o = int(self.f_off.value)
+            lbl.add_css_class("field-uv" if o < 0 else "field-ov" if o > 0 else "field-changed")
+        # other fields: accent highlight (temp goes red when raised above stock)
+        self.f_vlim.mark(self._vlim() < VMAX_MV)
+        if self.f_pow is not None:
+            self.f_pow.mark(int(self.f_pow.value) != int(self.pow_applied))
+        if self.f_mem is not None:
+            self.f_mem.mark(int(self.f_mem.value * 1000) != int(self.mem_applied))
+        if self.f_temp is not None:
+            tl = self.f_temp.label
+            for c in ("field-changed", "field-hot"):
+                tl.remove_css_class(c)
+            if int(self.f_temp.value) != int(self.temp_applied):
+                tl.add_css_class("field-hot" if self.f_temp.value >= 95 else "field-changed")
         self.apply_btn.set_visible(changed)
+        (self.apply_btn.add_css_class if changed else self.apply_btn.remove_css_class)("pulse")
 
-    def _on_slide(self, *_):
-        self.offset = self.scale.get_value()
-        self._hint(); self.area.queue_draw(); self._mark()
-
+    # ---- apply / reset ----
     def _apply(self, *_):
-        # build a queue of (args, on_success, label) for each changed knob, then
-        # run them sequentially (each is a persisted xe-gpu-oc call)
-        want = int(self.offset)
         queue = []
-        if want != int(self.applied):
-            queue.append((["xe-gpu-oc", "offset", str(want)],
-                          lambda: (setattr(self, "applied", want), self._hint()),
-                          f"voltage {'+' if want > 0 else ''}{want} mV"))
-        if self.mem_spin is not None:
-            wm = int(self.mem_spin.get_value() * 1000)
+        if self._vf_changed():
+            if self.mode == "offset" and self._vlim() >= VMAX_MV:
+                off = int(self.f_off.value)
+                queue.append((["xe-gpu-oc", "offset", str(off)],
+                              lambda off=off: self._vf_done(off, None),
+                              f"voltage {'+' if off > 0 else ''}{off} mV"))
+            elif self.mode == "offset":
+                off = int(self.f_off.value)
+                queue.append((["xe-gpu-oc", "offset", str(off), str(self._vlim())],
+                              lambda off=off: self._vf_done(off, None),
+                              f"voltage {'+' if off > 0 else ''}{off} mV ≤{self._vlim()}"))
+            else:
+                tgt = self._target_curve()
+                pairs = [f"{i}:{tgt[i]}" for i in range(len(tgt))]
+                queue.append((["xe-gpu-oc", "curve"] + pairs,
+                              lambda tgt=tgt: self._vf_done(None, tgt),
+                              "custom curve"))
+        if self.f_pow is not None:
+            wp = int(self.f_pow.value)
+            if wp != int(self.pow_applied):
+                queue.append((["xe-gpu-tune", "set", "--power-w", str(wp)],
+                              lambda wp=wp: setattr(self, "pow_applied", wp),
+                              f"power {wp} W"))
+        if self.f_mem is not None:
+            wm = int(self.f_mem.value * 1000)
             if wm != int(self.mem_applied):
                 queue.append((["xe-gpu-oc", "mem", str(wm)],
                               lambda wm=wm: setattr(self, "mem_applied", wm),
                               f"memory {wm / 1000:.2f} Gbps"))
-        if self.temp_spin is not None:
-            wt = int(self.temp_spin.get_value())
+        if self.f_temp is not None:
+            wt = int(self.f_temp.value)
             if wt != int(self.temp_applied):
                 queue.append((["xe-gpu-oc", "temp", str(wt)],
                               lambda wt=wt: setattr(self, "temp_applied", wt),
@@ -733,26 +997,124 @@ class VoltageCurveView(Gtk.Box):
 
         def run_next(i):
             if i >= len(queue):
-                self._mark()
-                return
+                self._mark(); return
             args, on_ok, _ = queue[i]
             run_priv(args, self.window, lambda: (on_ok(), run_next(i + 1)))
         run_next(0)
         self.window.toast("Applying " + ", ".join(q[2] for q in queue) + " (saved)…")
 
+    def _vf_done(self, off, curve):
+        if off is not None:
+            self.applied = off; self.applied_curve = None
+        if curve is not None:
+            self.applied_curve = list(curve)
+        self._hint()
+
     def _reset(self, *_):
         def ok():
-            self.applied = 0
-            self._load()          # re-reads curve, offset, memory speed, temp limit
+            self.applied = 0; self.applied_curve = None
+            self._load()          # re-reads curve, offset, memory, temp, power
         run_priv(["xe-gpu-oc", "reset"], self.window, ok)
-        self.window.toast("Restoring stock voltage curve + memory speed + temp limit…")
+        self.window.toast("Restoring stock curve + memory speed + temp limit…")
+
+    # ---- stability test ----
+    def _stress(self, *_):
+        if self._testing:
+            return
+        self._testing = True
+        self.test_btn.set_sensitive(False); self.apply_btn.set_sensitive(False)
+        self.hint.set_text("stability test starting…")
+        self.window.toast(f"Stability test: {STRESS_SECS}s GPU load…")
+
+        def work():
+            summary = {}
+            try:
+                p = subprocess.Popen([HELPER_PATHS["xe-gpu-stress"], str(STRESS_SECS)],
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            except OSError as e:
+                GLib.idle_add(self._stress_done, {"STATUS": "error", "_err": str(e)}); return
+            for line in p.stdout:
+                line = line.strip()
+                if line.startswith("PROGRESS"):
+                    f = line.split()
+                    if len(f) == 4:
+                        GLib.idle_add(self._stress_progress, f[1], f[2], f[3])
+                elif "=" in line:
+                    k, v = line.split("=", 1); summary[k] = v
+            p.wait()
+            GLib.idle_add(self._stress_done, summary)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _stress_progress(self, sec, mhz, tc):
+        self.hint.set_text(f"testing… {sec}s / {STRESS_SECS}s · {mhz} MHz · {tc}°C")
+        return False
+
+    def _stress_done(self, s):
+        self._testing = False
+        self.test_btn.set_sensitive(True); self.apply_btn.set_sensitive(True)
+        st = s.get("STATUS", "error")
+        mt, mnf, mxf = s.get("MAXTEMP", "?"), s.get("MINFREQ", "?"), s.get("MAXFREQ", "?")
+        if st == "no_workload":
+            self.window.toast("Install glmark2 or vkmark to run a stability test", ms=4000)
+        elif st == "error":
+            self.window.toast("Stability test could not start")
+        elif st == "unstable":
+            self.window.toast(f"UNSTABLE under load (peak {mt}°C) — reverting to stock", ms=4500)
+            run_priv(["xe-gpu-oc", "reset"], self.window,
+                     lambda: (setattr(self, "applied", 0),
+                              setattr(self, "applied_curve", None), self._load()))
+        elif st == "throttled":
+            self.window.toast(f"Stable but throttled — hit {mt}°C "
+                              f"(limit {s.get('TEMPLIMIT', '?')}°C)", ms=4500)
+        else:
+            self.window.toast(f"Stable ✓ — {STRESS_SECS}s, peak {mt}°C, "
+                              f"{mnf}–{mxf} MHz, no hang", ms=4500)
+        if s.get("NOTE") and st in ("ok", "throttled"):
+            self.window.toast(s["NOTE"], ms=5500)
+        self._hint()
+        return False
+
+    # ---- geometry ----
+    def _geo(self):
+        return 50, 12, self.area.get_width() - 12, self.area.get_height() - 22
+
+    def _node_px(self, a, geo):
+        L, T, R, B = geo
+        n = len(self.stock)
+        i = self.anchor_i[a]
+        x = L + i / max(n - 1, 1) * (R - L)
+        tgt = self._target_curve()               # sit the node on the real (monotonic) curve
+        v = tgt[i] if i < len(tgt) else int(self.stock[i])
+        y = B - (v - VMIN_MV) / (VMAX_MV - VMIN_MV) * (B - T)
+        return x, y
+
+    # ---- drag (curve mode) ----
+    def _on_begin(self, g, x, y):
+        self._drag = None
+        if self.mode != "curve" or not self.stock:
+            return
+        geo = self._geo()
+        for a in range(len(self.anchor_i)):
+            px, py = self._node_px(a, geo)
+            if (px - x) ** 2 + (py - y) ** 2 <= 16 ** 2:
+                self._drag = a; break
+
+    def _on_update(self, g, dx, dy):
+        if self._drag is None:
+            return
+        _, sx, sy = g.get_start_point()
+        L, T, R, B = self._geo()
+        v = VMIN_MV + (B - (sy + dy)) / max(B - T, 1) * (VMAX_MV - VMIN_MV)
+        v = max(VMIN_MV, min(VMAX_MV, v))
+        a = self._drag
+        self.anchor_off[a] = int(round(v - self.stock[self.anchor_i[a]]))
+        self._hint(); self.area.queue_draw(); self._mark()
 
     # ---- drawing ----
     def _draw(self, area, cr, w, h, *_):
         L, T, R, B = 50, 12, w - 12, h - 22
         fg = area.get_color(); r, g, b = fg.red, fg.green, fg.blue
-        cr.select_font_face("sans", 0, 0); cr.set_font_size(10)
-        cr.set_line_width(1)
+        cr.select_font_face("sans", 0, 0); cr.set_font_size(10); cr.set_line_width(1)
         for mv in range(VMIN_MV, VMAX_MV + 1, 200):
             y = B - (mv - VMIN_MV) / (VMAX_MV - VMIN_MV) * (B - T)
             cr.set_source_rgba(r, g, b, 0.10); cr.move_to(L, y); cr.line_to(R, y); cr.stroke()
@@ -761,29 +1123,57 @@ class VoltageCurveView(Gtk.Box):
         cr.move_to(L, B + 14); cr.show_text("idle")
         cr.move_to(R - 24, B + 14); cr.show_text("max")
         if self._loading or not self.stock:
-            cr.set_source_rgba(r, g, b, 0.5)
-            cr.move_to(L + 12, (T + B) / 2)
-            cr.show_text("reading curve…" if self._loading else "no OC data (xe_gt_oc patch not loaded)")
+            cr.set_source_rgba(r, g, b, 0.5); cr.move_to(L + 12, (T + B) / 2)
+            cr.show_text("reading…" if self._loading else "no OC data (xe_gt_oc patch not loaded)")
             return
         n = len(self.stock)
 
-        def px(i, mv):
-            x = L + i / max(n - 1, 1) * (R - L)
+        def X(i):
+            return L + i / max(n - 1, 1) * (R - L)
+
+        def Y(mv):
             mv = max(VMIN_MV, min(VMAX_MV, mv))
-            y = B - (mv - VMIN_MV) / (VMAX_MV - VMIN_MV) * (B - T)
-            return x, y
+            return B - (mv - VMIN_MV) / (VMAX_MV - VMIN_MV) * (B - T)
+
+        # voltage-limit line (red, dashed)
+        vlim = self._vlim()
+        if vlim < VMAX_MV:
+            yl = Y(vlim)
+            cr.set_source_rgba(0.88, 0.11, 0.14, 0.85); cr.set_line_width(1.4); cr.set_dash([6, 3])
+            cr.move_to(L, yl); cr.line_to(R, yl); cr.stroke(); cr.set_dash([])
+            cr.move_to(R - 62, yl - 3); cr.show_text(f"limit {vlim}")
+
+        tgt = self._target_curve()               # monotonic, limit-clamped
+
+        # filled zones under preview, coloured per segment by delta vs stock
+        for i in range(1, n):
+            c = volt_color(tgt[i] - self.stock[i])
+            cr.set_source_rgba(c[0], c[1], c[2], 0.13)
+            cr.move_to(X(i - 1), B); cr.line_to(X(i - 1), Y(tgt[i - 1]))
+            cr.line_to(X(i), Y(tgt[i])); cr.line_to(X(i), B); cr.close_path(); cr.fill()
+
         # stock (dashed, dim)
         cr.set_dash([4, 3]); cr.set_line_width(1.4); cr.set_source_rgba(r, g, b, 0.35)
-        for i, mv in enumerate(self.stock):
-            x, y = px(i, mv)
-            cr.line_to(x, y) if i else cr.move_to(x, y)
+        for i in range(n):
+            (cr.line_to if i else cr.move_to)(X(i), Y(self.stock[i]))
         cr.stroke(); cr.set_dash([])
-        # preview (stock + offset, accent)
-        cr.set_line_width(2.4); cr.set_source_rgba(0.21, 0.52, 0.89, 0.95)
-        for i, mv in enumerate(self.stock):
-            x, y = px(i, mv + self.offset)
-            cr.line_to(x, y) if i else cr.move_to(x, y)
-        cr.stroke()
+
+        # preview line, coloured per segment (green undervolt → amber/red overvolt)
+        cr.set_line_width(2.6)
+        for i in range(1, n):
+            c = volt_color(tgt[i] - self.stock[i])
+            cr.set_source_rgba(c[0], c[1], c[2], 0.97)
+            cr.move_to(X(i - 1), Y(tgt[i - 1])); cr.line_to(X(i), Y(tgt[i])); cr.stroke()
+
+        # anchor nodes (curve mode), tinted by their own delta
+        if self.mode == "curve":
+            geo = (L, T, R, B)
+            for a in range(len(self.anchor_i)):
+                px, py = self._node_px(a, geo)
+                idx = self.anchor_i[a]
+                c = volt_color(tgt[idx] - self.stock[idx])
+                cr.set_source_rgba(c[0], c[1], c[2], 1.0); cr.arc(px, py, 6, 0, 6.29); cr.fill()
+                cr.set_source_rgba(1, 1, 1, 0.92); cr.arc(px, py, 2.6, 0, 6.29); cr.fill()
 
 
 # ---------------------------------------------------------------- window

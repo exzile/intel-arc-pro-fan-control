@@ -65,7 +65,9 @@ sudo bash scripts/apply_xefan.sh                 # dry-run
 sudo APPLY=1 bash scripts/apply_xefan.sh         # apply + build
 # install the module + reload — see docs/INSTALL.md
 
-# 2. install the userland helpers + persistence
+# 2. install the userland helpers + GUI (one command; re-run after every `git pull`)
+sudo bash install.sh
+# ...or install pieces individually:
 sudo install -m755 scripts/xe-fan-curve.sh  /usr/local/bin/xe-fan-curve
 sudo install -m755 scripts/xe-gpu-tune.sh   /usr/local/bin/xe-gpu-tune
 sudo install -m755 scripts/xe-gpu-temps.sh  /usr/local/bin/xe-gpu-temps
