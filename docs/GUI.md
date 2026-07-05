@@ -17,8 +17,9 @@ temperature sensor — the four mains (pkg / mctrl / pcie / vram) plus all VRAM 
 headroom to each sensor's crit limit, with a flame on the hottest. Controls:
 
 - **Fan**: *Curve* (opens the editor), *Auto* (stock table), *Max* (full speed).
-- **Power cap / Min clock / Max clock** spinners → **Apply** / **Reset**. Hover the ⓘ icons for what
-  each does (min clock is the idle floor — lowering it saves idle power/heat).
+- **Power cap, clock limits & power profile** live on the **Overclock tab** (all performance knobs
+  in one place). On a system *without* the `xe_gt_oc` patch — where there's no Overclock tab — they
+  fall back to spinners here (**Power cap / Min clock / Max clock** → **Apply** / **Reset**).
 
 ## Fan Curve tab
 A graphical editor for the 10-point hardware fan table:

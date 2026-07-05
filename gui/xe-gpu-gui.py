@@ -747,6 +747,40 @@ class VoltageCurveView(Gtk.Box):
                 tip="Thermal-throttle target. Higher = more sustained clock before throttling; "
                     "lower = cooler/quieter.", on_change=self._on_knob)
             r += 1
+        # clocks + power profile — consolidated here from the Dashboard (all perf knobs in one place)
+        cl = self.gpu.clocks()
+        clo = cl.get("rpn") or 400
+        chi = cl.get("rp0") or 2400
+        self.cmin_applied = int(cl.get("min") or clo)
+        self.cmax_applied = int(cl.get("max") or chi)
+        self.f_cmin = SliderField(
+            grid, r, "go-first-symbolic", "Min clock", clo, chi, 50, self.cmin_applied, "MHz",
+            tip="Idle clock floor. Lower (e.g. 400) drops idle power/heat; still boosts under load.",
+            on_change=self._on_knob)
+        r += 1
+        self.f_cmax = SliderField(
+            grid, r, "go-last-symbolic", "Max clock", clo, chi, 50, self.cmax_applied, "MHz",
+            tip="Clock ceiling under load. Lower for less heat/noise; raise to the hardware max for "
+                "peak performance.", on_change=self._on_knob)
+        r += 1
+        self.profile_dd = None
+        self.prof_applied = None
+        prof = self.gpu.power_profile()
+        if prof and prof.get("options"):
+            picon = Gtk.Image(icon_name="power-profile-balanced-symbolic")
+            picon.add_css_class("field-icon")
+            plbl = Gtk.Label(label="Power profile", xalign=0); plbl.add_css_class("field-label")
+            plbl.set_tooltip_text("Driver power profile: 'power_saving' trims idle draw; "
+                                  "'base' is the default.")
+            self.profile_dd = Gtk.DropDown.new_from_strings(prof["options"])
+            if prof.get("current") in prof["options"]:
+                self.profile_dd.set_selected(prof["options"].index(prof["current"]))
+                self.prof_applied = prof["current"]
+            self.profile_dd.set_halign(Gtk.Align.START)
+            self.profile_dd.connect("notify::selected", lambda *_: self._on_knob())
+            grid.attach(picon, 0, r, 1, 1); grid.attach(plbl, 1, r, 1, 1)
+            grid.attach(self.profile_dd, 2, r, 1, 1)
+            r += 1
         self.append(grid)
 
         # --- action bar ---
@@ -854,8 +888,25 @@ class VoltageCurveView(Gtk.Box):
             cap = self.gpu.power().get("cap_w")
             if cap:
                 self.pow_applied = int(cap); self.f_pow.value = cap
+        cl = self.gpu.clocks()
+        if cl.get("min"):
+            self.cmin_applied = int(cl["min"]); self.f_cmin.value = cl["min"]
+        if cl.get("max"):
+            self.cmax_applied = int(cl["max"]); self.f_cmax.value = cl["max"]
+        if self.profile_dd is not None:
+            prof = self.gpu.power_profile()
+            opts = (prof or {}).get("options") or []
+            if prof and prof.get("current") in opts:
+                self.prof_applied = prof["current"]
+                self.profile_dd.set_selected(opts.index(prof["current"]))
         self._hint(); self.area.queue_draw(); self._mark()
         return False
+
+    def _prof_sel(self):
+        if self.profile_dd is None:
+            return None
+        it = self.profile_dd.get_selected_item()
+        return it.get_string() if it else None
 
     def _anchors(self, n):
         k = min(8, max(2, n - 1))
@@ -932,6 +983,10 @@ class VoltageCurveView(Gtk.Box):
             changed |= int(self.f_mem.value * 1000) != int(self.mem_applied)
         if self.f_temp is not None:
             changed |= int(self.f_temp.value) != int(self.temp_applied)
+        changed |= int(self.f_cmin.value) != int(self.cmin_applied)
+        changed |= int(self.f_cmax.value) != int(self.cmax_applied)
+        if self.profile_dd is not None:
+            changed |= self._prof_sel() != self.prof_applied
         # voltage offset: semantic colour (green undervolt / amber overvolt)
         lbl = self.f_off.label
         for c in ("field-changed", "field-uv", "field-ov"):
@@ -951,6 +1006,8 @@ class VoltageCurveView(Gtk.Box):
                 tl.remove_css_class(c)
             if int(self.f_temp.value) != int(self.temp_applied):
                 tl.add_css_class("field-hot" if self.f_temp.value >= 95 else "field-changed")
+        self.f_cmin.mark(int(self.f_cmin.value) != int(self.cmin_applied))
+        self.f_cmax.mark(int(self.f_cmax.value) != int(self.cmax_applied))
         self.apply_btn.set_visible(changed)
         (self.apply_btn.add_css_class if changed else self.apply_btn.remove_css_class)("pulse")
 
@@ -974,12 +1031,23 @@ class VoltageCurveView(Gtk.Box):
                 queue.append((["xe-gpu-oc", "curve"] + pairs,
                               lambda tgt=tgt: self._vf_done(None, tgt),
                               "custom curve"))
-        if self.f_pow is not None:
-            wp = int(self.f_pow.value)
-            if wp != int(self.pow_applied):
-                queue.append((["xe-gpu-tune", "set", "--power-w", str(wp)],
-                              lambda wp=wp: setattr(self, "pow_applied", wp),
-                              f"power {wp} W"))
+        # power + clocks + profile all go through xe-gpu-tune — batch into ONE call
+        # (one auth prompt) instead of a separate pkexec per knob.
+        tune = ["xe-gpu-tune", "set"]; tune_oks = []; tune_lbls = []
+        if self.f_pow is not None and int(self.f_pow.value) != int(self.pow_applied):
+            wp = int(self.f_pow.value); tune += ["--power-w", str(wp)]
+            tune_oks.append(lambda wp=wp: setattr(self, "pow_applied", wp)); tune_lbls.append(f"power {wp} W")
+        if int(self.f_cmin.value) != int(self.cmin_applied):
+            wv = int(self.f_cmin.value); tune += ["--clk-min", str(wv)]
+            tune_oks.append(lambda wv=wv: setattr(self, "cmin_applied", wv)); tune_lbls.append(f"min {wv} MHz")
+        if int(self.f_cmax.value) != int(self.cmax_applied):
+            wv = int(self.f_cmax.value); tune += ["--clk-max", str(wv)]
+            tune_oks.append(lambda wv=wv: setattr(self, "cmax_applied", wv)); tune_lbls.append(f"max {wv} MHz")
+        if self.profile_dd is not None and self._prof_sel() != self.prof_applied:
+            wv = self._prof_sel(); tune += ["--profile", wv]
+            tune_oks.append(lambda wv=wv: setattr(self, "prof_applied", wv)); tune_lbls.append(f"profile {wv}")
+        if len(tune) > 2:
+            queue.append((tune, lambda oks=tune_oks: [f() for f in oks], ", ".join(tune_lbls)))
         if self.f_mem is not None:
             wm = int(self.f_mem.value * 1000)
             if wm != int(self.mem_applied):
@@ -1011,11 +1079,11 @@ class VoltageCurveView(Gtk.Box):
         self._hint()
 
     def _reset(self, *_):
-        def ok():
+        def after_oc():
             self.applied = 0; self.applied_curve = None
-            self._load()          # re-reads curve, offset, memory, temp, power
-        run_priv(["xe-gpu-oc", "reset"], self.window, ok)
-        self.window.toast("Restoring stock curve + memory speed + temp limit…")
+            run_priv(["xe-gpu-tune", "reset"], self.window, self._load)   # then power/clocks/profile
+        run_priv(["xe-gpu-oc", "reset"], self.window, after_oc)
+        self.window.toast("Restoring stock curve + power/clocks + memory + temp…")
 
     # ---- stability test ----
     def _stress(self, *_):
@@ -1254,7 +1322,12 @@ class Window(Adw.ApplicationWindow):
         c.append(g); parent.append(c)
 
     def _build_controls(self, parent):
-        c = card("Controls", "Writes run the xe-* helpers via pkexec (asks for your password).")
+        # Fan quick-actions always live here. Power/clocks/profile live here ONLY when
+        # there's no Overclock tab (no xe_gt_oc patch); otherwise they're consolidated
+        # into the Overclock tab so all performance knobs sit together.
+        oc = self.gpu.oc_available
+        c = card("Fan" if oc else "Controls",
+                 "Writes run the xe-* helpers via pkexec (asks for your password).")
         fan = Gtk.Box(spacing=6)
         fl = Gtk.Label(label="Fan", xalign=0, width_chars=5); fl.add_css_class("dim")
         fan.append(fl)
@@ -1268,6 +1341,14 @@ class Window(Adw.ApplicationWindow):
                                "Max: run the fan at full speed",
                                lambda *_: run_priv(["xe-fan-curve", "max"], self, self.refresh)))
         c.append(fan)
+
+        if oc:
+            hint = Gtk.Label(
+                label="Power cap, clock limits & power profile are on the Overclock tab.",
+                xalign=0, wrap=True)
+            hint.add_css_class("dim"); hint.set_margin_top(4)
+            c.append(hint); parent.append(c)
+            return
 
         cl = self.gpu.clocks()
         lo, hi = cl.get("rpn") or 400, cl.get("rp0") or 2400
