@@ -325,10 +325,11 @@ def _temp_label(lbl):
 
 class Metric:
     def __init__(self, mid, label, unit, compute, spark=False, fixed=None, default=True,
-                 group="GPU", core=False):
+                 group="GPU", core=False, section="metrics"):
         self.id = mid; self.label = label; self.unit = unit; self.compute = compute
         self.spark = spark; self.fixed = fixed; self.default = default; self.group = group
         self.core = core          # core metrics are always shown; others are filter-toggled
+        self.section = section    # "metrics" or "temps" — which dashboard section the tile lives in
 
 
 def _temp_metric(lbl):
@@ -337,7 +338,8 @@ def _temp_metric(lbl):
         if not t:
             return {"text": "—"}
         rgb, st = temp_view(t["c"], t["crit"])
-        return {"text": str(t["c"]), "val": t["c"], "state": st, "rgb": rgb,
+        flame = " 🔥" if d.get("_hottest") == t["c"] else ""
+        return {"text": str(t["c"]) + flame, "val": t["c"], "state": st, "rgb": rgb,
                 "sub": (f"limit {t['crit']}°C" if t.get("crit") else None)}
     return f
 
@@ -371,8 +373,6 @@ def build_metrics(sample):
         Metric("power_card", "GPU Card Power", "W",
                lambda d: {"text": (f"{d['draw_card']:.0f}" if d.get("draw_card") is not None else "—"),
                           "val": d.get("draw_card")}, spark=True, core=True),
-        Metric("temp_gpu", "GPU Temperature", "°C", _temp_metric("pkg"),
-               spark=True, fixed=(20, 110), core=True),
         Metric("fan", "GPU Fan Speed", "rpm",
                lambda d: {"text": _num(d["fan"].get("rpm")), "val": d["fan"].get("rpm")},
                spark=True, core=True),
@@ -396,9 +396,22 @@ def build_metrics(sample):
                spark=True, fixed=(0, 100), default=False, group="Fan"),
         Metric("temp_pct", "GPU Temperature Percent", "%", _temp_pct,
                spark=True, fixed=(0, 100), default=False, group="Temperature"),
-        Metric("temp_vram", "VRAM Temperature", "°C", _temp_metric("vram"),
-               spark=True, fixed=(20, 110), default=False, group="Temperature"),
     ]
+
+
+def build_temp_metrics(sample):
+    """Per-sensor temperature tiles — one metric each, so they're filterable and never
+    duplicated. pkg is core (always shown); the rest are optional."""
+    out = []
+    mains = [t["label"] for t in sample.get("mains", [])]
+    chans = sorted([t["label"] for t in sample.get("vram", [])],
+                   key=lambda x: int(x.rsplit("_", 1)[-1]))
+    for lbl in mains + chans:
+        label = ("VRAM ch " + lbl.rsplit("_", 1)[-1]) if lbl.startswith("vram_ch_") else _temp_label(lbl)
+        out.append(Metric(f"temp_{lbl}", label, "°C", _temp_metric(lbl), spark=True,
+                          fixed=(20, 110), default=False, core=(lbl == "pkg"),
+                          group="Temperatures", section="temps"))
+    return out
 
 
 class MetricTile(Gtk.Box):
@@ -1663,35 +1676,27 @@ class Window(Adw.ApplicationWindow):
 
     def _build_dashboard(self):
         sample = self.gpu.snapshot()
-        self.metrics = build_metrics(sample)
+        self.metrics = build_metrics(sample) + build_temp_metrics(sample)
         self.metric_by_id = {m.id: m for m in self.metrics}
-        self._extras = [m for m in self.metrics if not m.core]
+        self._optional = [m for m in self.metrics if not m.core]
         saved = load_config().get("metrics", {})
-        self.visible = {m.id: bool(saved.get(m.id, m.default)) for m in self._extras}
+        self.visible = {m.id: bool(saved.get(m.id, m.default)) for m in self._optional}
         self.tiles = {}
         self._energy_prev = {}
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
                        margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
         self._build_specs(page)                    # Specifications — full-width top row
-        # Metrics + Temperatures combined into one scrolling area, as labelled sections
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         mh = Gtk.Box(spacing=6)
         ml = Gtk.Label(label="METRICS", xalign=0, hexpand=True); ml.add_css_class("section")
         mh.append(ml); mh.append(self._build_filter_button())
         body.append(mh)
-        self.flow = Gtk.FlowBox(column_spacing=10, row_spacing=10, homogeneous=True,
-                                min_children_per_line=2, max_children_per_line=6,
-                                selection_mode=Gtk.SelectionMode.NONE)
-        self.flow.set_filter_func(self._metric_visible)
-        for m in self.metrics:
-            tile = MetricTile(m.label, m.unit, spark=m.spark, fixed=m.fixed)
-            tile.metric_id = m.id
-            self.tiles[m.id] = tile
-            self.flow.append(tile)
-        body.append(self.flow)
+        self.metrics_flow = self._tile_flow([m for m in self.metrics if m.section == "metrics"])
+        body.append(self.metrics_flow)
         th = Gtk.Label(label="TEMPERATURES", xalign=0); th.add_css_class("section"); th.set_margin_top(8)
         body.append(th)
-        self._build_temps(body, sample)            # temperature tiles, same full-width flow
+        self.temps_flow = self._tile_flow([m for m in self.metrics if m.section == "temps"])
+        body.append(self.temps_flow)
         sw = Gtk.ScrolledWindow(vexpand=True)
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         sw.set_child(body)
@@ -1699,49 +1704,79 @@ class Window(Adw.ApplicationWindow):
         self._build_controls(page)                 # power/clock card only when there's no OC tab
         return page
 
+    def _tile_flow(self, metrics):
+        flow = Gtk.FlowBox(column_spacing=10, row_spacing=10, homogeneous=True,
+                           min_children_per_line=2, max_children_per_line=6,
+                           selection_mode=Gtk.SelectionMode.NONE)
+        flow.set_filter_func(self._metric_visible)
+        for m in metrics:
+            tile = MetricTile(m.label, m.unit, spark=m.spark, fixed=m.fixed)
+            tile.metric_id = m.id
+            self.tiles[m.id] = tile
+            flow.append(tile)
+        return flow
+
     def _metric_visible(self, child):
         mid = getattr(child.get_child(), "metric_id", None)
         m = self.metric_by_id.get(mid)
         return bool(m and (m.core or self.visible.get(mid, False)))
 
+    def _refilter(self):
+        self.metrics_flow.invalidate_filter(); self.temps_flow.invalidate_filter()
+
     def _build_filter_button(self):
-        btn = Gtk.MenuButton(tooltip_text="Show/hide optional metrics (saved across launches)")
+        btn = Gtk.Button(tooltip_text="Choose which metrics & temperatures to show "
+                                      "(saved across launches)")
         btn.set_child(Adw.ButtonContent(icon_name="view-list-symbolic", label="Metrics"))
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
-                      margin_start=8, margin_end=8, margin_top=8, margin_bottom=8)
-        cap = Gtk.Label(label="Optional metrics (the core four are always shown)",
-                        xalign=0, wrap=True, max_width_chars=30); cap.add_css_class("msub")
-        box.append(cap)
-        row = Gtk.Box(spacing=6, margin_top=4)
-        row.append(icon_button("edit-select-all-symbolic", "Show all",
-                               lambda *_: self._filter_bulk(True), label="All"))
-        row.append(icon_button("edit-clear-all-symbolic", "Hide all",
-                               lambda *_: self._filter_bulk(False), label="None"))
-        box.append(row)
-        self._filter_checks = {}
-        lastgroup = None
-        for m in self._extras:
-            if m.group != lastgroup:
-                gl = Gtk.Label(label=m.group.upper(), xalign=0); gl.add_css_class("filter-group")
-                box.append(gl); lastgroup = m.group
-            cb = Gtk.CheckButton(label=m.label)
-            cb.set_active(self.visible.get(m.id, m.default))
-            cb.connect("toggled", self._on_filter_toggle, m.id)
-            self._filter_checks[m.id] = cb
-            box.append(cb)
-        pop = Gtk.Popover(); pop.set_child(box)   # full height, no scrolling
-        btn.set_popover(pop)
+        btn.connect("clicked", lambda *_: self._open_filter_dialog())
         return btn
+
+    def _open_filter_dialog(self):
+        dlg = Adw.Window(transient_for=self, modal=True, title="Choose metrics",
+                         default_width=580, default_height=600)
+        tv = Adw.ToolbarView(); hb = Adw.HeaderBar()
+        ab = Gtk.Button(label="All"); ab.connect("clicked", lambda *_: self._filter_bulk(True))
+        nb = Gtk.Button(label="None"); nb.connect("clicked", lambda *_: self._filter_bulk(False))
+        hb.pack_start(ab); hb.pack_start(nb)
+        done = Gtk.Button(label="Done"); done.add_css_class("suggested-action")
+        done.connect("clicked", lambda *_: dlg.close()); hb.pack_end(done)
+        tv.add_top_bar(hb)
+        cols = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=24,
+                       margin_start=16, margin_end=16, margin_top=12, margin_bottom=16)
+        colA = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
+        colB = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
+        cols.append(colA); cols.append(colB)
+        self._filter_checks = {}
+
+        def fill(parent, items):
+            lastgroup = None
+            for m in items:
+                if m.group != lastgroup:
+                    gl = Gtk.Label(label=m.group.upper(), xalign=0); gl.add_css_class("filter-group")
+                    parent.append(gl); lastgroup = m.group
+                cb = Gtk.CheckButton(label=m.label)
+                cb.set_active(self.visible.get(m.id, m.default))
+                cb.connect("toggled", self._on_filter_toggle, m.id)
+                self._filter_checks[m.id] = cb
+                parent.append(cb)
+        fill(colA, [m for m in self._optional if m.section == "metrics"])   # metrics groups
+        fill(colB, [m for m in self._optional if m.section == "temps"])     # temperature sensors
+        sw = Gtk.ScrolledWindow(vexpand=True)
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.set_child(cols)
+        tv.set_content(sw); dlg.set_content(tv)
+        dlg.present()
 
     def _on_filter_toggle(self, cb, mid):
         self.visible[mid] = cb.get_active()
-        self._persist_filter(); self.flow.invalidate_filter()
+        self._persist_filter(); self._refilter()
 
     def _filter_bulk(self, val):
-        for m in self._extras:
+        for m in self._optional:
             self.visible[m.id] = val
-            self._filter_checks[m.id].set_active(val)
-        self._persist_filter(); self.flow.invalidate_filter()
+            if m.id in self._filter_checks:
+                self._filter_checks[m.id].set_active(val)
+        self._persist_filter(); self._refilter()
 
     def _persist_filter(self):
         cfg = load_config(); cfg["metrics"] = self.visible; save_config(cfg)
@@ -1763,21 +1798,6 @@ class Window(Adw.ApplicationWindow):
             item.append(k); item.append(v)
             flow.append(item); self.spec_rows[key] = v
         c.append(flow); parent.append(c)
-
-    def _build_temps(self, parent, sample):
-        # one full-width flow of temperature tiles (mains first, then VRAM channels)
-        self.temp_tiles = {}
-        tflow = Gtk.FlowBox(column_spacing=10, row_spacing=10, homogeneous=True,
-                            min_children_per_line=2, max_children_per_line=6,
-                            selection_mode=Gtk.SelectionMode.NONE)
-        order = [t["label"] for t in sample.get("mains", [])] + \
-            sorted([t["label"] for t in sample.get("vram", [])], key=lambda x: int(x.rsplit("_", 1)[-1]))
-        for lbl in order:
-            label = ("VRAM ch " + lbl.rsplit("_", 1)[-1]) if lbl.startswith("vram_ch_") else _temp_label(lbl)
-            tile = MetricTile(label, "°C", spark=True, fixed=(20, 110))
-            self.temp_tiles[lbl] = tile
-            tflow.append(tile)
-        parent.append(tflow)
 
     def _build_controls(self, parent):
         # Power/clocks/profile live here ONLY when there's no Overclock tab (no xe_gt_oc
@@ -1931,7 +1951,8 @@ class Window(Adw.ApplicationWindow):
         _chk("power_lim", any(tf.get(k) for k in ("pl1", "pl2", "pl4")))
         _chk("temp_lim", tf.get("thermal"))
         _chk("volt_lim", tf.get("vr_tdc"))
-        # --- Metrics (core always, extras only when enabled) ---
+        # --- Metrics + Temperatures (one unified pass; temps are metrics too) ---
+        data["_hottest"] = max((t["c"] for t in data["mains"] + data["vram"]), default=None)
         for m in self.metrics:
             tile = self.tiles.get(m.id)
             if tile is None or (not m.core and not self.visible.get(m.id)):
@@ -1947,17 +1968,6 @@ class Window(Adw.ApplicationWindow):
             self.editor.cur_pkg = pkg["c"]
         if getattr(self, "oc_view", None) is not None:
             self.oc_view.set_telemetry(cl.get("cur"), pkg["c"] if pkg else None, data["fan"].get("rpm"))
-        # --- temperatures (colour-graded tiles with sparklines) ---
-        alltemps = data["mains"] + data["vram"]
-        hottest = max((t["c"] for t in alltemps), default=None)
-        for t in alltemps:
-            tile = self.temp_tiles.get(t["label"])
-            if tile is None:
-                continue
-            rgb, st = temp_view(t["c"], t["crit"])
-            txt = f"{t['c']}" + (" 🔥" if t["c"] == hottest else "")
-            tile.update(txt, spark_val=t["c"], rgb=rgb, state=st,
-                        sub=(f"limit {t['crit']}°C" if t.get("crit") else None))
         return False
 
 

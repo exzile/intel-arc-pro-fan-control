@@ -20,7 +20,7 @@ Below it, **Metrics** and **Temperatures** are two labelled sections that fill t
 each a wrap-to-fit grid of uniform **tiles with scrolling sparklines**. Tiles are neutral; **only the
 number and its graph line turn red** when a sensor runs hot (within 12 °C of its crit limit).
 
-**Metrics** are named after Intel Arc Control where a matching xe reading exists. The four core
+**Metrics** are named after Intel Arc Control where a matching xe reading exists. The core
 metrics are always shown — **GPU Frequency**, **GPU Card Power**, **GPU Temperature**, **GPU Fan
 Speed**. The **Metrics** button opens a dropdown of optional ones (hidden by default): GPU Actual
 Frequency, GPU Power, GPU Power Percent, GPU Fan Duty, GPU Temperature Percent and VRAM Temperature. *All* / *None* toggle in bulk; the
