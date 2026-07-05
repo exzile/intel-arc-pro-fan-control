@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # xe-gpu-gui — native GTK4/libadwaita control panel for the Intel Arc (xe) GPU.
-# Tabs: Dashboard (live stats + tuning) and Fan Curve (graphical draggable editor).
-# Controls call xe-fan-curve / xe-gpu-tune via pkexec (polkit prompts for writes).
-# Reads are unprivileged sysfs; no kernel poking here.
+# Tabs: Dashboard (live stats + tuning), Fan Curve (graphical draggable editor),
+# and Overclock (voltage-frequency curve graph + offset slider — shown when the
+# xe_gt_oc patch exposes .../gt0/oc/vf_curve).
+# Controls call xe-fan-curve / xe-gpu-tune / xe-gpu-oc via pkexec (polkit prompts
+# for writes). Reads are unprivileged sysfs; no kernel poking here.
 import os, glob, subprocess, threading
 import gi
 gi.require_version("Gtk", "4.0")
@@ -157,6 +159,23 @@ class XeGpu:
         if not pts or len(set(p for _, p in pts)) <= 1 or len(set(temps)) < 3:
             return list(PRESETS["Balanced"])
         return pts
+
+    def oc_node(self):
+        return os.path.join(self.card or "_", "device/tile0/gt0/oc/vf_curve")
+
+    @property
+    def oc_available(self):
+        return os.path.exists(self.oc_node())
+
+    def read_vf_curve(self):
+        # 85 "<index> <voltage_mV>" lines -> list of mV by point index. [] if unavailable.
+        raw = _read(self.oc_node())
+        out = []
+        for line in (raw or "").splitlines():
+            f = line.split()
+            if len(f) == 2 and f[0].lstrip("-").isdigit() and f[1].lstrip("-").isdigit():
+                out.append(int(f[1]))
+        return out
 
 
 PRESETS = {
@@ -505,6 +524,158 @@ class CurveEditor(Gtk.Box):
         self.window.toast(f"Applying fan curve ({len(pts)} points)…")
 
 
+# ---------------------------------------------------------------- overclock
+VMIN_MV, VMAX_MV = 400, 1200      # OC voltage clamp (matches xe-gpu-oc / xe_gt_oc)
+
+
+class VoltageCurveView(Gtk.Box):
+    """Voltage-frequency curve viewer + bulk voltage-offset control (needs xe_gt_oc)."""
+    def __init__(self, gpu, window):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.gpu = gpu
+        self.window = window
+        self.stock = []          # baseline curve (mV per point), applied-offset removed
+        self.offset = 0          # slider value (mV) to preview / apply
+        self.applied = 0         # offset currently on the GPU (tracked by this view)
+        self._loading = True
+
+        self.area = Gtk.DrawingArea(hexpand=True, vexpand=True)
+        self.area.set_size_request(560, 300)
+        self.area.set_draw_func(self._draw)
+        frame = Gtk.Frame(); frame.add_css_class("card2"); frame.set_child(self.area)
+        self.append(frame)
+
+        row = Gtk.Box(spacing=10)
+        lab = Gtk.Label(label="Voltage offset", xalign=0); lab.add_css_class("section")
+        row.append(lab)
+        self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, -100, 100, 5)
+        self.scale.set_hexpand(True)
+        self.scale.set_draw_value(True)
+        self.scale.set_value_pos(Gtk.PositionType.RIGHT)
+        self.scale.add_mark(0, Gtk.PositionType.BOTTOM, None)
+        self.scale.connect("value-changed", self._on_slide)
+        row.append(self.scale)
+        row.append(Gtk.Label(label="mV"))
+        self.append(row)
+
+        bar = Gtk.Box(spacing=8)
+        self.hint = Gtk.Label(xalign=0, hexpand=True); self.hint.add_css_class("dim")
+        bar.append(self.hint)
+        bar.append(icon_button("view-refresh-symbolic", "Re-read the curve from the GPU",
+                               lambda *_: self._load(), label="Reload"))
+        bar.append(icon_button("edit-undo-symbolic", "Restore the stock voltage curve",
+                               self._reset, label="Reset"))
+        self.apply_btn = icon_button("emblem-ok-symbolic",
+                                     "Apply the voltage offset — asks for authorization",
+                                     self._apply, label="Apply", css="suggested-action")
+        bar.append(self.apply_btn)
+        self.append(bar)
+
+        note = Gtk.Label(
+            label="The GPU voltage-frequency curve — X = frequency step (idle → max), Y = voltage. "
+                  "Slide left to undervolt (−mV: cooler, more efficient) or right to overvolt "
+                  "(+mV: headroom for higher clocks), then Apply. Reset restores stock.",
+            xalign=0, wrap=True)
+        note.add_css_class("dim")
+        self.append(note)
+        self._load()
+
+    # ---- data ----
+    def _load(self, *_):
+        self._loading = True
+        self.hint.set_text("reading curve…")
+        self.area.queue_draw()
+
+        def work():
+            data = self.gpu.read_vf_curve()
+            GLib.idle_add(self._loaded, data)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _loaded(self, data):
+        self._loading = False
+        if data:
+            # the live curve already includes self.applied; baseline = live − applied
+            self.stock = [v - self.applied for v in data]
+        self.scale.set_value(self.applied)
+        self.offset = self.applied
+        self._hint(); self.area.queue_draw(); self._mark()
+        return False
+
+    def _hint(self):
+        if not self.stock:
+            self.hint.set_text("")
+            return
+        lo = min(self.stock) + int(self.offset)
+        hi = max(self.stock) + int(self.offset)
+        self.hint.set_text(f"{len(self.stock)} points · {lo}–{hi} mV"
+                           + (f"  (offset {'+' if self.offset > 0 else ''}{int(self.offset)} mV)"
+                              if self.offset else ""))
+
+    def _mark(self):
+        self.apply_btn.set_visible(int(self.offset) != int(self.applied))
+
+    def _on_slide(self, *_):
+        self.offset = self.scale.get_value()
+        self._hint(); self.area.queue_draw(); self._mark()
+
+    def _apply(self, *_):
+        delta = int(self.offset) - int(self.applied)
+        if not delta:
+            return
+        want = int(self.offset)
+
+        def ok():
+            self.applied = want
+            self._hint(); self._mark()
+        run_priv(["xe-gpu-oc", "offset", str(delta)], self.window, ok)
+        self.window.toast(f"Applying voltage offset {'+' if want > 0 else ''}{want} mV…")
+
+    def _reset(self, *_):
+        def ok():
+            self.applied = 0
+            self._load()
+        run_priv(["xe-gpu-oc", "reset"], self.window, ok)
+        self.window.toast("Restoring the stock voltage curve…")
+
+    # ---- drawing ----
+    def _draw(self, area, cr, w, h, *_):
+        L, T, R, B = 50, 12, w - 12, h - 22
+        fg = area.get_color(); r, g, b = fg.red, fg.green, fg.blue
+        cr.select_font_face("sans", 0, 0); cr.set_font_size(10)
+        cr.set_line_width(1)
+        for mv in range(VMIN_MV, VMAX_MV + 1, 200):
+            y = B - (mv - VMIN_MV) / (VMAX_MV - VMIN_MV) * (B - T)
+            cr.set_source_rgba(r, g, b, 0.10); cr.move_to(L, y); cr.line_to(R, y); cr.stroke()
+            cr.set_source_rgba(r, g, b, 0.45); cr.move_to(8, y + 3); cr.show_text(str(mv))
+        cr.set_source_rgba(r, g, b, 0.45)
+        cr.move_to(L, B + 14); cr.show_text("idle")
+        cr.move_to(R - 24, B + 14); cr.show_text("max")
+        if self._loading or not self.stock:
+            cr.set_source_rgba(r, g, b, 0.5)
+            cr.move_to(L + 12, (T + B) / 2)
+            cr.show_text("reading curve…" if self._loading else "no OC data (xe_gt_oc patch not loaded)")
+            return
+        n = len(self.stock)
+
+        def px(i, mv):
+            x = L + i / max(n - 1, 1) * (R - L)
+            mv = max(VMIN_MV, min(VMAX_MV, mv))
+            y = B - (mv - VMIN_MV) / (VMAX_MV - VMIN_MV) * (B - T)
+            return x, y
+        # stock (dashed, dim)
+        cr.set_dash([4, 3]); cr.set_line_width(1.4); cr.set_source_rgba(r, g, b, 0.35)
+        for i, mv in enumerate(self.stock):
+            x, y = px(i, mv)
+            cr.line_to(x, y) if i else cr.move_to(x, y)
+        cr.stroke(); cr.set_dash([])
+        # preview (stock + offset, accent)
+        cr.set_line_width(2.4); cr.set_source_rgba(0.21, 0.52, 0.89, 0.95)
+        for i, mv in enumerate(self.stock):
+            x, y = px(i, mv + self.offset)
+            cr.line_to(x, y) if i else cr.move_to(x, y)
+        cr.stroke()
+
+
 # ---------------------------------------------------------------- window
 class Window(Adw.ApplicationWindow):
     def __init__(self, app):
@@ -548,6 +719,14 @@ class Window(Adw.ApplicationWindow):
         curve_wrap.append(self.editor)
         p2 = self.stack.add_titled(curve_wrap, "curve", "Fan Curve")
         p2.set_icon_name("power-profile-balanced-symbolic")
+
+        # Overclock tab — only if the xe_gt_oc patch exposes the VF curve
+        if self.gpu.oc_available:
+            self.oc_view = VoltageCurveView(self.gpu, self)
+            oc_wrap = Gtk.Box(margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
+            oc_wrap.append(self.oc_view)
+            p3 = self.stack.add_titled(oc_wrap, "oc", "Overclock")
+            p3.set_icon_name("power-profile-performance-symbolic")
 
         self.tcache = {}          # label -> °C
         self._reading = False
@@ -609,21 +788,9 @@ class Window(Adw.ApplicationWindow):
             self.profile_dd.connect("notify::selected", lambda *_: self._mark_tune())
             kv(g, 3, "Power profile", self.profile_dd,
                "Driver power profile: 'power_saving' trims idle draw; 'base' is the default.")
-        # voltage-frequency curve offset — only if the xe_gt_oc patch is present
-        self.sp_volt = None
-        self.volt_applied = 0
-        oc_node = os.path.join(self.gpu.card or "", "device/tile0/gt0/oc/vf_curve")
-        if os.path.exists(oc_node):
-            self.sp_volt = self._spin(-100, 100, 5, 0)
-            kv(g, 4, "Voltage offset (mV)", self.sp_volt,
-               "Shift the whole voltage-frequency curve. Negative = undervolt (cooler/efficient); "
-               "positive = more headroom for higher clocks.")
         c.append(g)
         self.tune_base = self._tune_vals()
-        spins = [self.sp_pow, self.sp_min, self.sp_max]
-        if self.sp_volt is not None:
-            spins.append(self.sp_volt)
-        for sp in spins:
+        for sp in (self.sp_pow, self.sp_min, self.sp_max):
             sp.connect("value-changed", lambda *_: self._mark_tune())
         btns = Gtk.Box(spacing=6, halign=Gtk.Align.END)
         btns.append(icon_button("edit-undo-symbolic", "Reset power & clocks to hardware defaults",
@@ -639,20 +806,14 @@ class Window(Adw.ApplicationWindow):
         if getattr(self, "profile_dd", None) is not None:
             it = self.profile_dd.get_selected_item()
             prof = it.get_string() if it else None
-        volt = self.sp_volt.get_value() if getattr(self, "sp_volt", None) is not None else 0
-        return (self.sp_pow.get_value(), self.sp_min.get_value(), self.sp_max.get_value(), prof, volt)
+        return (self.sp_pow.get_value(), self.sp_min.get_value(), self.sp_max.get_value(), prof)
 
     def _mark_tune(self):
         self.tune_apply.set_visible(self._tune_vals() != self.tune_base)
 
     def _reset_tune(self, *_):
-        if getattr(self, "sp_volt", None) is not None and self.volt_applied != 0:
-            run_priv(["xe-gpu-oc", "reset"], self,
-                     lambda: run_priv(["xe-gpu-tune", "reset"], self, self._after_reset))
-            self.toast("Resetting power, clocks & voltage to defaults…")
-        else:
-            run_priv(["xe-gpu-tune", "reset"], self, self._after_reset)
-            self.toast("Resetting power & clocks to hardware defaults…")
+        run_priv(["xe-gpu-tune", "reset"], self, self._after_reset)
+        self.toast("Resetting power & clocks to hardware defaults…")
 
     def _after_reset(self):
         self.refresh()
@@ -663,9 +824,6 @@ class Window(Adw.ApplicationWindow):
             self.sp_max.set_value(cl["max"])
         if pw.get("cap_w"):
             self.sp_pow.set_value(pw["cap_w"])
-        if getattr(self, "sp_volt", None) is not None:
-            self.sp_volt.set_value(0)
-        self.volt_applied = 0
         self.tune_base = self._tune_vals()
         self._mark_tune()
 
@@ -706,28 +864,13 @@ class Window(Adw.ApplicationWindow):
             args += ["--clk-max", str(int(cur[2]))]
         if len(cur) > 3 and cur[3] and cur[3] != self.tune_base[3]:
             args += ["--profile", cur[3]]
-        tune_changed = len(args) > 2
-        # voltage offset -> xe-gpu-oc offset <delta from last-applied>
-        volt = cur[4] if len(cur) > 4 else 0
-        delta = int(volt) - int(self.volt_applied)
-        oc_args = ["xe-gpu-oc", "offset", str(delta)] if delta else None
-        if not tune_changed and not oc_args:
+        if len(args) == 2:      # nothing actually changed
             return
-
-        def do_oc():
-            run_priv(oc_args, self, self.refresh)
-            self.volt_applied = int(volt)
-        if tune_changed:
-            run_priv(args, self, do_oc if oc_args else self.refresh)
-        elif oc_args:
-            do_oc()
+        run_priv(args, self, self.refresh)
         self.tune_base = cur
         self._mark_tune()
-        msg = " ".join(args[2:]).replace("--power-w", "power").replace(
-            "--clk-min", "min").replace("--clk-max", "max").replace("--profile", "profile")
-        if oc_args:
-            msg = (msg + " " if msg else "") + f"voltage {'+' if delta > 0 else ''}{delta}mV"
-        self.toast("Applying " + msg)
+        self.toast("Applying " + " ".join(args[2:]).replace("--power-w", "power")
+                   .replace("--clk-min", "min").replace("--clk-max", "max").replace("--profile", "profile"))
 
     def _tc(self, w, cls):
         for x in ("t-cool", "t-warm", "t-hot"):

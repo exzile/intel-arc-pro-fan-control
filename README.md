@@ -31,7 +31,7 @@ Related upstream issue: [intel/compute-runtime #885](https://github.com/intel/co
 | Idle power/heat optimization | ❌ (idles at 1200 MHz) | ✅ (idles at 400 MHz) |
 | All-sensor temp/health monitor | raw sysfs | ✅ `xe-gpu-temps` (table/watch/json) |
 | Single-command status dashboard | — | ✅ `xe-gpu` (fan+clocks+power+temps) |
-| Native desktop GUI | — | ✅ `xe-gpu-gui` (GTK4: live dashboard + fan-curve editor) |
+| Native desktop GUI | — | ✅ `xe-gpu-gui` (GTK4: dashboard + fan-curve editor + VF-curve overclock tab) |
 | Survives reboots | — | ✅ systemd |
 | Survives kernel updates | — | ✅ auto-rebuild hook |
 

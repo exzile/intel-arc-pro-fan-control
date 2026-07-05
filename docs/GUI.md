@@ -29,5 +29,19 @@ A graphical editor for the 10-point hardware fan table:
 - The dashed vertical line shows the current package temperature.
 - **Apply** writes it as the manual curve (via `xe-fan-curve set …`, prompted by polkit).
 
-All writes go through the `xe-fan-curve` / `xe-gpu-tune` helpers with `pkexec`, so you get a normal
-authorization prompt and nothing runs elevated in the background.
+## Overclock tab
+
+Appears only when the `xe_gt_oc` patch is loaded (it exposes `.../gt0/oc/vf_curve` — see
+[OVERCLOCKING.md](OVERCLOCKING.md)). It shows the GPU's **voltage-frequency curve** as a graph
+(X = frequency step, idle → max; Y = voltage in mV), with the stock curve dashed and your preview
+solid.
+
+- **Voltage offset** slider — drag left to **undervolt** (−mV: cooler, more efficient) or right to
+  **overvolt** (+mV: headroom for higher clocks). The graph previews the shifted curve live.
+- **Apply** writes the offset (`xe-gpu-oc offset …`); **Reset** restores the stock curve; **Reload**
+  re-reads it from the GPU.
+- Voltage is clamped to a safe 400–1200 mV. Combine with the Dashboard's power/clock controls for a
+  full overclock.
+
+All writes go through the `xe-fan-curve` / `xe-gpu-tune` / `xe-gpu-oc` helpers with `pkexec`, so you
+get a normal authorization prompt and nothing runs elevated in the background.
