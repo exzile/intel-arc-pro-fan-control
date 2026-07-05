@@ -1729,10 +1729,7 @@ class Window(Adw.ApplicationWindow):
             cb.connect("toggled", self._on_filter_toggle, m.id)
             self._filter_checks[m.id] = cb
             box.append(cb)
-        fsw = Gtk.ScrolledWindow(propagate_natural_width=True)
-        fsw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        fsw.set_max_content_height(420); fsw.set_child(box)
-        pop = Gtk.Popover(); pop.set_child(fsw)
+        pop = Gtk.Popover(); pop.set_child(box)   # full height, no scrolling
         btn.set_popover(pop)
         return btn
 
