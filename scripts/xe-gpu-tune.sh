@@ -32,11 +32,13 @@ show() {
     echo "power : cap $(( $(rd $HW/power1_cap)/1000000 )) W (crit $(( $(rd $HW/power1_crit 2>/dev/null || echo 0)/1000000 )) W)"
   fi
   [ -n "$HW" ] && echo "temp  : $(( $(rd $HW/temp2_input)/1000 )) C"
+  [ -e "$GT/power_profile" ] && echo "profile: $(rd $GT/power_profile)   (writable: base | power_saving)"
 }
 
 set_power_w() { [ -n "$HW" ] && [ -e "$HW/power1_cap" ] && echo $(( $1 * 1000000 )) > "$HW/power1_cap" && echo "  power cap -> ${1} W"; }
 set_clk_min() { echo "$1" > "$GT/min_freq" && echo "  min clock -> ${1} MHz"; }
 set_clk_max() { echo "$1" > "$GT/max_freq" && echo "  max clock -> ${1} MHz"; }
+set_profile() { [ -e "$GT/power_profile" ] && echo "$1" > "$GT/power_profile" && echo "  power profile -> ${1}"; }
 
 case "${1:-show}" in
   show) show ;;
@@ -53,6 +55,7 @@ case "${1:-show}" in
         --power-w) set_power_w "$2"; shift 2;;
         --clk-min) set_clk_min "$2"; shift 2;;
         --clk-max) set_clk_max "$2"; shift 2;;
+        --profile) set_profile "$2"; shift 2;;
         *) echo "unknown arg: $1"; exit 1;;
       esac
     done
@@ -60,12 +63,13 @@ case "${1:-show}" in
   boot)
     CONF=/etc/xe-gpu-tune.conf
     [ -r "$CONF" ] || { echo "no $CONF; nothing to apply"; exit 0; }
-    POWER_W=""; CLK_MIN=""; CLK_MAX=""
+    POWER_W=""; CLK_MIN=""; CLK_MAX=""; PROFILE=""
     # shellcheck disable=SC1090
     . "$CONF"
     [ -n "$POWER_W" ] && set_power_w "$POWER_W"
     [ -n "$CLK_MIN" ] && set_clk_min "$CLK_MIN"
     [ -n "$CLK_MAX" ] && set_clk_max "$CLK_MAX"
+    [ -n "$PROFILE" ] && set_profile "$PROFILE"
     echo "boot tuning applied:"; show ;;
-  *) echo "usage: xe-gpu-tune {show|set [--power-w N] [--clk-min MHZ] [--clk-max MHZ]|reset|boot}"; exit 1;;
+  *) echo "usage: xe-gpu-tune {show|set [--power-w N] [--clk-min MHZ] [--clk-max MHZ] [--profile base|power_saving]|reset|boot}"; exit 1;;
 esac

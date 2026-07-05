@@ -115,6 +115,19 @@ class XeGpu:
                 out.append({"label": lbl, "c": v // 1000, "crit": crit})
         return out
 
+    def power_profile(self):
+        # freq0/power_profile e.g. "[base] power_saving" — bracketed token is the active one
+        raw = _read(os.path.join(self.card or "", "device/tile0/gt0/freq0/power_profile"))
+        if not raw:
+            return None
+        opts, cur = [], None
+        for tok in raw.split():
+            name = tok.strip("[]")
+            opts.append(name)
+            if tok.startswith("["):
+                cur = name
+        return {"current": cur, "options": opts} if opts else None
+
     def temps(self):
         return self.temps_where(False) + self.temps_where(True)
 
@@ -586,6 +599,15 @@ class Window(Adw.ApplicationWindow):
         kv(g, 1, "Min clock (MHz)", self.sp_min,
            "Idle clock floor. Lowering it (e.g. 400) drops idle power/heat; still boosts under load.")
         kv(g, 2, "Max clock (MHz)", self.sp_max, "Clock ceiling. Lower for less heat/noise under load.")
+        prof = self.gpu.power_profile()
+        self.profile_dd = None
+        if prof and prof.get("options"):
+            self.profile_dd = Gtk.DropDown.new_from_strings(prof["options"])
+            if prof.get("current") in prof["options"]:
+                self.profile_dd.set_selected(prof["options"].index(prof["current"]))
+            self.profile_dd.connect("notify::selected", lambda *_: self._mark_tune())
+            kv(g, 3, "Power profile", self.profile_dd,
+               "Driver power profile: 'power_saving' trims idle draw; 'base' is the default.")
         c.append(g)
         self.tune_base = self._tune_vals()
         for sp in (self.sp_pow, self.sp_min, self.sp_max):
@@ -600,7 +622,11 @@ class Window(Adw.ApplicationWindow):
         self._mark_tune()
 
     def _tune_vals(self):
-        return (self.sp_pow.get_value(), self.sp_min.get_value(), self.sp_max.get_value())
+        prof = None
+        if getattr(self, "profile_dd", None) is not None:
+            it = self.profile_dd.get_selected_item()
+            prof = it.get_string() if it else None
+        return (self.sp_pow.get_value(), self.sp_min.get_value(), self.sp_max.get_value(), prof)
 
     def _mark_tune(self):
         self.tune_apply.set_visible(self._tune_vals() != self.tune_base)
@@ -656,13 +682,15 @@ class Window(Adw.ApplicationWindow):
             args += ["--clk-min", str(int(cur[1]))]
         if cur[2] != self.tune_base[2]:
             args += ["--clk-max", str(int(cur[2]))]
+        if len(cur) > 3 and cur[3] and cur[3] != self.tune_base[3]:
+            args += ["--profile", cur[3]]
         if len(args) == 2:      # nothing actually changed
             return
         run_priv(args, self, self.refresh)
         self.tune_base = cur
         self._mark_tune()
         self.toast("Applying " + " ".join(args[2:]).replace("--power-w", "power")
-                   .replace("--clk-min", "min").replace("--clk-max", "max"))
+                   .replace("--clk-min", "min").replace("--clk-max", "max").replace("--profile", "profile"))
 
     def _tc(self, w, cls):
         for x in ("t-cool", "t-warm", "t-hot"):
