@@ -14,14 +14,14 @@ Launch **Arc GPU Dashboard** from your apps menu, or run `xe-gpu-gui`.
 ## Dashboard tab
 Live (2 s) monitoring, in three parts:
 
-**Specifications** (top) — the fixed limits & configuration, *not* live metrics: device, power cap,
+**Specifications** (top-left) — the fixed limits & configuration, *not* live metrics: device, power cap,
 power limit (I1), clock limits, hardware clock range, power profile, fan mode.
 
 **Temperatures** (left) — every sensor (four mains: pkg / mctrl / pcie / vram, plus all VRAM
 channels), colour-graded through a 7-band gradient (**teal-green → amber → red**) by headroom to
 crit, with the whole tile border shifting colour with the heat.
 
-**Metrics** (right) — only values that *change*, as tiles with **scrolling sparklines**. Named after
+**Metrics** (right, full height) — only values that *change*, as tiles with **scrolling sparklines**. Named after
 Intel Arc Control where a matching xe reading exists. The four core metrics are always shown — **GPU
 Frequency**, **GPU Card Power**, **GPU Temperature**, **GPU Fan Speed**. The **Metrics** button opens
 a dropdown of optional ones (hidden by default): GPU Actual Frequency, GPU Power, GPU Power Percent,

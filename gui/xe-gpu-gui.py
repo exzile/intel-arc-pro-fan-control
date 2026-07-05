@@ -1690,18 +1690,16 @@ class Window(Adw.ApplicationWindow):
         self.visible = {m.id: bool(saved.get(m.id, m.default)) for m in self._extras}
         self.tiles = {}
         self._energy_prev = {}
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                       margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
-        self._build_specs(page)                    # fixed values, on top
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+                      margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12); left.set_size_request(360, -1)
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True)
         row.append(left); row.append(right)
-        self._build_temps(left)                    # Temperatures on the left
-        self._build_metrics_card(right)            # live Metrics on the right
-        page.append(row)
-        self._build_controls(page)                 # power/clock card only when there's no OC tab
-        return page
+        self._build_specs(left)                    # Specifications (top-left)
+        self._build_temps(left)                    # Temperatures (under it, left column)
+        self._build_controls(left)                 # power/clock card only when there's no OC tab
+        self._build_metrics_card(right)            # live Metrics fill the right column
+        return row
 
     def _metric_visible(self, child):
         mid = getattr(child.get_child(), "metric_id", None)
