@@ -25,36 +25,19 @@ CSS = b"""
         transition: border-color 220ms ease, background 220ms ease; }
 .chip .cval { font-weight: 700; }
 .chip .clbl { opacity: 0.60; font-size: 0.74em; }
-/* graduated temperature scale by headroom to crit: teal(cool) -> green -> lime ->
-   yellow -> orange -> red(hot). the whole border + tint + value colour shift with heat. */
-.tb0{color:#22c3a6;} .chip.tb0{background:alpha(#22c3a6,0.12);border-color:#22c3a6;}
-.tb1{color:#2fd07f;} .chip.tb1{background:alpha(#2fd07f,0.13);border-color:#2fd07f;}
-.tb2{color:#9ad12f;} .chip.tb2{background:alpha(#9ad12f,0.14);border-color:#9ad12f;}
-.tb3{color:#f5c211;} .chip.tb3{background:alpha(#f5c211,0.15);border-color:#f5c211;}
-.tb4{color:#ff9f45;} .chip.tb4{background:alpha(#ff9f45,0.16);border-color:#ff9f45;}
-.tb5{color:#ff6b3d;} .chip.tb5{background:alpha(#ff6b3d,0.17);border-color:#ff6b3d;}
-.tb6{color:#ff4d4d;} .chip.tb6{background:alpha(#ff4d4d,0.19);border-color:#ff4d4d;}
 .info { opacity:0.45; }
 
-/* --- dashboard metric tiles (Windows-style live panel w/ sparklines) --- */
+/* --- dashboard metric tiles (uniform, neutral; only value+line go red when hot) --- */
 .mtile  { background: alpha(@window_fg_color,0.05); border-radius: 12px; padding: 9px 11px;
-          border: 2px solid alpha(@window_fg_color,0.10);
-          transition: border-color 220ms ease, background 220ms ease; }
-.mtile.tb0{border-color:alpha(#22c3a6,0.6);background:alpha(#22c3a6,0.10);}
-.mtile.tb1{border-color:alpha(#2fd07f,0.6);background:alpha(#2fd07f,0.10);}
-.mtile.tb2{border-color:alpha(#9ad12f,0.6);background:alpha(#9ad12f,0.10);}
-.mtile.tb3{border-color:alpha(#f5c211,0.6);background:alpha(#f5c211,0.11);}
-.mtile.tb4{border-color:alpha(#ff9f45,0.7);background:alpha(#ff9f45,0.12);}
-.mtile.tb5{border-color:alpha(#ff6b3d,0.7);background:alpha(#ff6b3d,0.13);}
-.mtile.tb6{border-color:alpha(#ff4d4d,0.8);background:alpha(#ff4d4d,0.15);}
+          border: 2px solid alpha(@window_fg_color,0.10); }
 .mlabel { font-size:0.70em; font-weight:800; opacity:0.55; letter-spacing:.06em; }
 .mvalue { font-size:1.7em; font-weight:800; }
-.mvalue.tb0{color:#22c3a6;} .mvalue.tb1{color:#2fd07f;} .mvalue.tb2{color:#9ad12f;}
-.mvalue.tb3{color:#f5c211;} .mvalue.tb4{color:#ff9f45;} .mvalue.tb5{color:#ff6b3d;}
-.mvalue.tb6{color:#ff4d4d;}
+.mvalue.hot { color:#ff5c57; }        /* value turns red when a sensor is near its crit limit */
 .munit  { opacity:0.50; font-size:0.9em; }
 .msub   { opacity:0.55; font-size:0.76em; }
 .filter-group { font-size:0.72em; font-weight:800; opacity:0.5; letter-spacing:.05em; margin-top:6px; }
+.specitem-label { opacity:0.55; font-size:0.74em; }
+.specitem-val   { font-weight:700; }
 
 /* --- overclock form: aligned rows, icons, animated controls --- */
 .field-icon  { opacity:0.72; }
@@ -290,20 +273,20 @@ PRESETS = {
 }
 
 
-BAND_CLASSES = ("tb0", "tb1", "tb2", "tb3", "tb4", "tb5", "tb6")
-_BAND_RGB = {"tb0": (0.13, 0.76, 0.65), "tb1": (0.18, 0.82, 0.50), "tb2": (0.60, 0.82, 0.18),
-             "tb3": (0.96, 0.76, 0.07), "tb4": (1.0, 0.62, 0.27), "tb5": (1.0, 0.42, 0.24),
-             "tb6": (1.0, 0.30, 0.30)}
+TEMP_RGB = (0.36, 0.62, 0.82)     # normal temperature line — neutral blue (no green)
+HOT_RGB = (1.0, 0.36, 0.34)       # red, used for the line + number when a sensor runs hot
 
 
-def temp_style(c, crit):
-    """Graduated temperature colour by headroom to the crit limit (falls back to an
-    absolute scale if crit is unknown). Returns (band_class, rgb)."""
-    head = (crit - c) if crit else (100 - c)
-    for thresh, cls in ((45, "tb0"), (35, "tb1"), (27, "tb2"), (20, "tb3"), (13, "tb4"), (7, "tb5")):
-        if head >= thresh:
-            return cls, _BAND_RGB[cls]
-    return "tb6", _BAND_RGB["tb6"]
+def temp_hot(c, crit):
+    # "hot" = within 12 °C of the sensor's crit limit (absolute >=88 °C if crit unknown)
+    return bool(c >= (crit - 12)) if crit else (c >= 88)
+
+
+def temp_view(c, crit):
+    """Neutral by default; red line + red number when the sensor is hot. Returns
+    (line_rgb, value_state) where value_state is 'hot' or None."""
+    hot = temp_hot(c, crit)
+    return (HOT_RGB if hot else TEMP_RGB), ("hot" if hot else None)
 
 
 SPARK_MAXPTS = 120        # sparkline history capacity — oldest drops as new samples arrive
@@ -351,7 +334,7 @@ def _temp_metric(lbl):
         t = d["temp_by_label"].get(lbl)
         if not t:
             return {"text": "—"}
-        st, rgb = temp_style(t["c"], t["crit"])
+        rgb, st = temp_view(t["c"], t["crit"])
         return {"text": str(t["c"]), "val": t["c"], "state": st, "rgb": rgb,
                 "sub": (f"limit {t['crit']}°C" if t.get("crit") else None)}
     return f
@@ -362,14 +345,14 @@ def _temp_pct(d):
     if not t or not t.get("crit"):
         return {"text": "—"}
     p = round(t["c"] / t["crit"] * 100)
-    st, rgb = temp_style(t["c"], t["crit"])
+    rgb, st = temp_view(t["c"], t["crit"])
     return {"text": str(p), "val": p, "state": st, "rgb": rgb}
 
 
 def _limit(flag_keys):
     def f(d):
         on = any((d.get("throttle_flags") or {}).get(k) for k in flag_keys)
-        return {"text": "yes", "state": "tb5", "rgb": _BAND_RGB["tb5"]} if on else {"text": "no"}
+        return {"text": "yes", "state": "hot", "rgb": HOT_RGB} if on else {"text": "no"}
     return f
 
 
@@ -453,10 +436,11 @@ class MetricTile(Gtk.Box):
         self.val.set_text(text)
         if rgb is not None:
             self._rgb = rgb
-        for cc in BAND_CLASSES:
-            self.val.remove_css_class(cc); self.remove_css_class(cc)
-        if state:
-            self.val.add_css_class(state); self.add_css_class(state)
+        # only the number colours (tile stays neutral); "hot" => red
+        if state == "hot":
+            self.val.add_css_class("hot")
+        else:
+            self.val.remove_css_class("hot")
         if sub is not None:
             self.sub.set_text(sub); self.sub.set_visible(bool(sub))
         if spark_val is not None and self.area is not None:
@@ -1690,31 +1674,17 @@ class Window(Adw.ApplicationWindow):
         self.visible = {m.id: bool(saved.get(m.id, m.default)) for m in self._extras}
         self.tiles = {}
         self._energy_prev = {}
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
-                      margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
-        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12); left.set_size_request(360, -1)
-        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True)
-        row.append(left); row.append(right)
-        self._build_specs(left)                    # Specifications (top-left)
-        self._build_temps(left, sample)            # Temperatures (under it, left column)
-        self._build_controls(left)                 # power/clock card only when there's no OC tab
-        self._build_metrics_card(right)            # live Metrics fill the right column
-        return row
-
-    def _metric_visible(self, child):
-        mid = getattr(child.get_child(), "metric_id", None)
-        m = self.metric_by_id.get(mid)
-        return bool(m and (m.core or self.visible.get(mid, False)))
-
-    def _build_metrics_card(self, parent):
-        c = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8); c.add_css_class("card2")
-        c.set_hexpand(True); c.set_vexpand(True)
-        head = Gtk.Box(spacing=6)
-        t = Gtk.Label(label="METRICS", xalign=0, hexpand=True); t.add_css_class("section")
-        head.append(t); head.append(self._build_filter_button())
-        c.append(head)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                       margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
+        self._build_specs(page)                    # Specifications — full-width top row
+        # Metrics + Temperatures combined into one scrolling area, as labelled sections
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        mh = Gtk.Box(spacing=6)
+        ml = Gtk.Label(label="METRICS", xalign=0, hexpand=True); ml.add_css_class("section")
+        mh.append(ml); mh.append(self._build_filter_button())
+        body.append(mh)
         self.flow = Gtk.FlowBox(column_spacing=10, row_spacing=10, homogeneous=True,
-                                min_children_per_line=2, max_children_per_line=3,
+                                min_children_per_line=2, max_children_per_line=6,
                                 selection_mode=Gtk.SelectionMode.NONE)
         self.flow.set_filter_func(self._metric_visible)
         for m in self.metrics:
@@ -1722,7 +1692,21 @@ class Window(Adw.ApplicationWindow):
             tile.metric_id = m.id
             self.tiles[m.id] = tile
             self.flow.append(tile)
-        c.append(self.flow); parent.append(c)
+        body.append(self.flow)
+        th = Gtk.Label(label="TEMPERATURES", xalign=0); th.add_css_class("section"); th.set_margin_top(8)
+        body.append(th)
+        self._build_temps(body, sample)            # temperature tiles, same full-width flow
+        sw = Gtk.ScrolledWindow(vexpand=True)
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.set_child(body)
+        page.append(sw)
+        self._build_controls(page)                 # power/clock card only when there's no OC tab
+        return page
+
+    def _metric_visible(self, child):
+        mid = getattr(child.get_child(), "metric_id", None)
+        m = self.metric_by_id.get(mid)
+        return bool(m and (m.core or self.visible.get(mid, False)))
 
     def _build_filter_button(self):
         btn = Gtk.MenuButton(tooltip_text="Show/hide optional metrics (saved across launches)")
@@ -1772,50 +1756,34 @@ class Window(Adw.ApplicationWindow):
     def _build_specs(self, parent):
         c = card("Specifications", "Fixed limits & configuration — not live metrics.")
         self.spec_rows = {}
-        g = Gtk.Grid(column_spacing=18, row_spacing=6)
+        flow = Gtk.FlowBox(column_spacing=24, row_spacing=8, homogeneous=False,
+                           min_children_per_line=2, max_children_per_line=8,
+                           selection_mode=Gtk.SelectionMode.NONE)
         rows = [("device", "Device"), ("cap", "Power cap"), ("limit", "Power limit (I1)"),
                 ("clk", "Clock limits"), ("hw", "Hardware range"), ("profile", "Power profile"),
                 ("fan", "Fan mode")]
-        for i, (key, label) in enumerate(rows):
-            col = (i % 2) * 2; r = i // 2
-            k = Gtk.Label(label=label, xalign=0); k.add_css_class("dim")
-            v = Gtk.Label(label="—", xalign=0); v.add_css_class("cval")
-            g.attach(k, col, r, 1, 1); g.attach(v, col + 1, r, 1, 1)
-            self.spec_rows[key] = v
-        c.append(g); parent.append(c)
+        for key, label in rows:
+            item = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            k = Gtk.Label(label=label, xalign=0); k.add_css_class("specitem-label")
+            v = Gtk.Label(label="—", xalign=0); v.add_css_class("specitem-val")
+            item.append(k); item.append(v)
+            flow.append(item); self.spec_rows[key] = v
+        c.append(flow); parent.append(c)
 
     def _build_temps(self, parent, sample):
-        c = card("Temperatures", "All sensors, colour-graded by headroom to crit, with live sparklines.")
-        c.set_vexpand(True)
-        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        # one full-width flow of temperature tiles (mains first, then VRAM channels)
         self.temp_tiles = {}
-        mains = [t["label"] for t in sample.get("mains", [])]
-        mg = Gtk.Grid(column_spacing=8, row_spacing=8, column_homogeneous=True)
-        for i, lbl in enumerate(mains):
-            tile = MetricTile(_temp_label(lbl), "°C", spark=True, fixed=(20, 110))
+        tflow = Gtk.FlowBox(column_spacing=10, row_spacing=10, homogeneous=True,
+                            min_children_per_line=2, max_children_per_line=6,
+                            selection_mode=Gtk.SelectionMode.NONE)
+        order = [t["label"] for t in sample.get("mains", [])] + \
+            sorted([t["label"] for t in sample.get("vram", [])], key=lambda x: int(x.rsplit("_", 1)[-1]))
+        for lbl in order:
+            label = ("VRAM ch " + lbl.rsplit("_", 1)[-1]) if lbl.startswith("vram_ch_") else _temp_label(lbl)
+            tile = MetricTile(label, "°C", spark=True, fixed=(20, 110))
             self.temp_tiles[lbl] = tile
-            mg.attach(tile, i % 2, i // 2, 1, 1)
-        inner.append(mg)
-        chans = sorted([t["label"] for t in sample.get("vram", [])],
-                       key=lambda x: int(x.rsplit("_", 1)[-1]))
-        if chans:
-            vh = Gtk.Label(label="VRAM CHANNELS", xalign=0); vh.add_css_class("section")
-            vh.set_margin_top(2); inner.append(vh)
-            cg = Gtk.Grid(column_spacing=8, row_spacing=8, column_homogeneous=True)
-            for i, lbl in enumerate(chans):
-                tile = MetricTile("ch " + lbl.rsplit("_", 1)[-1], "°C", spark=True, fixed=(20, 110))
-                self.temp_tiles[lbl] = tile
-                cg.attach(tile, i % 2, i // 2, 1, 1)
-            inner.append(cg)
-        sw = Gtk.ScrolledWindow(vexpand=True)
-        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        sw.set_child(inner)
-        c.append(sw); parent.append(c)
-
-    def _tc(self, w, cls):
-        for x in BAND_CLASSES:
-            w.remove_css_class(x)
-        w.add_css_class(cls)
+            tflow.append(tile)
+        parent.append(tflow)
 
     def _build_controls(self, parent):
         # Power/clocks/profile live here ONLY when there's no Overclock tab (no xe_gt_oc
@@ -1909,11 +1877,6 @@ class Window(Adw.ApplicationWindow):
         self.toast("Applying " + " ".join(args[2:]).replace("--power-w", "power")
                    .replace("--clk-min", "min").replace("--clk-max", "max").replace("--profile", "profile"))
 
-    def _tc(self, w, cls):
-        for x in BAND_CLASSES:
-            w.remove_css_class(x)
-        w.add_css_class(cls)
-
     def refresh(self, *_):
         self._tick()      # trigger an async read (used by control after-callbacks)
         return False
@@ -1987,7 +1950,7 @@ class Window(Adw.ApplicationWindow):
             tile = self.temp_tiles.get(t["label"])
             if tile is None:
                 continue
-            st, rgb = temp_style(t["c"], t["crit"])
+            rgb, st = temp_view(t["c"], t["crit"])
             txt = f"{t['c']}" + (" 🔥" if t["c"] == hottest else "")
             tile.update(txt, spark_val=t["c"], rgb=rgb, state=st,
                         sub=(f"limit {t['crit']}°C" if t.get("crit") else None))

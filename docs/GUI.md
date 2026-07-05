@@ -12,22 +12,23 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 Launch **Arc GPU Dashboard** from your apps menu, or run `xe-gpu-gui`.
 
 ## Dashboard tab
-Live (2 s) monitoring, in three parts:
+Live (2 s) monitoring. A **Specifications** row spans the top — the fixed limits & configuration,
+*not* live metrics: device, power cap, power limit (I1), clock limits, hardware clock range, power
+profile, fan mode.
 
-**Specifications** (top-left) — the fixed limits & configuration, *not* live metrics: device, power cap,
-power limit (I1), clock limits, hardware clock range, power profile, fan mode.
+Below it, **Metrics** and **Temperatures** are two labelled sections that fill the rest of the space,
+each a wrap-to-fit grid of uniform **tiles with scrolling sparklines**. Tiles are neutral; **only the
+number and its graph line turn red** when a sensor runs hot (within 12 °C of its crit limit).
 
-**Temperatures** (left) — every sensor (four mains: pkg / mctrl / pcie / vram, plus all VRAM
-channels), colour-graded through a 7-band gradient (**teal-green → amber → red**) by headroom to
-crit, with the whole tile border shifting colour with the heat.
+**Metrics** are named after Intel Arc Control where a matching xe reading exists. The four core
+metrics are always shown — **GPU Frequency**, **GPU Card Power**, **GPU Temperature**, **GPU Fan
+Speed**. The **Metrics** button opens a dropdown of optional ones (hidden by default): GPU Actual
+Frequency, GPU Power, GPU Power Percent, GPU Fan Duty, GPU Temperature Percent, VRAM Temperature, and
+the limit indicators (GPU Power / Temperature / Voltage Limited). *All* / *None* toggle in bulk; the
+selection is **saved across launches** (`~/.config/xe-gpu-gui/config.json`).
 
-**Metrics** (right, full height) — only values that *change*, as tiles with **scrolling sparklines**. Named after
-Intel Arc Control where a matching xe reading exists. The four core metrics are always shown — **GPU
-Frequency**, **GPU Card Power**, **GPU Temperature**, **GPU Fan Speed**. The **Metrics** button opens
-a dropdown of optional ones (hidden by default): GPU Actual Frequency, GPU Power, GPU Power Percent,
-GPU Fan Duty, GPU Temperature Percent, VRAM Temperature, and the limit indicators (GPU Power /
-Temperature / Voltage Limited). *All* / *None* toggle in bulk; the selection is **saved across
-launches** (`~/.config/xe-gpu-gui/config.json`).
+**Temperatures** covers every sensor — the four mains (GPU / VRAM / Mem ctrl / PCIe) plus all VRAM
+channels — with the hottest flagged 🔥.
 
 > Metrics Intel Arc Control shows that xe doesn't expose (GPU/VRAM utilization %, VRAM used/size,
 > VRAM bandwidth/frequency, per-engine render/compute/media, frame-latency/FPS) aren't available on
