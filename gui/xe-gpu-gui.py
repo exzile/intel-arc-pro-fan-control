@@ -278,7 +278,7 @@ class CurveEditor(Gtk.Box):
         bar.append(icon_button("view-refresh-symbolic", "Reload the curve currently on the GPU",
                                lambda *_: (self._reload()), label="Reload"))
         bar.append(icon_button("edit-undo-symbolic",
-                               "Revert the fan to the card's stock auto table (undo manual control)",
+                               "Load the card's stock fan curve into the editor (press Apply to write it)",
                                self._stock, label="Stock"))
         self.hint = Gtk.Label(xalign=0, hexpand=True)
         self.hint.add_css_class("dim")
@@ -450,9 +450,37 @@ class CurveEditor(Gtk.Box):
         self.window.toast("Reloaded the curve currently on the GPU")
 
     def _stock(self, *_):
-        # hand the fan back to the card's stock auto table (pwm1_enable=2)
-        run_priv(["xe-fan-curve", "auto"], self.window)
-        self.window.toast("Reverting the fan to the stock auto table…")
+        # LOAD the card's stock curve into the editor (does not apply — press Apply to write it).
+        # Reading stock needs a privileged mode-flip that restores your current curve afterwards.
+        def work():
+            line = None
+            try:
+                r = subprocess.run(["pkexec", HELPER_PATHS["xe-fan-curve"], "stock-read"],
+                                   capture_output=True, text=True, timeout=25)
+                line = next((l for l in r.stdout.splitlines() if l.startswith("STOCK:")), None)
+            except Exception:
+                line = None
+            GLib.idle_add(self._load_stock, line)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _load_stock(self, line):
+        pts = []
+        if line:
+            for pr in line[len("STOCK:"):].split():
+                try:
+                    t, p = pr.split(":"); pts.append([int(t), int(p)])
+                except ValueError:
+                    pass
+        if not pts:
+            self.window.toast("Couldn't read the stock curve (cancelled?)")
+            return False
+        while len(pts) > 2 and pts[-1][1] == pts[-2][1]:   # trim trailing pad points (same pwm)
+            pts.pop()
+        self.points = pts
+        self.area.queue_draw()
+        self._mark()
+        self.window.toast("Loaded the stock curve — press Apply to write it")
+        return False
 
     def _apply(self, *_):
         pts = sorted(self.points)

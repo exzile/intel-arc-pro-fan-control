@@ -49,6 +49,26 @@ case "${1:-show}" in
   show) show ;;
   auto) echo 2 > "$HWMON/pwm1_enable"; echo "fan handed back to stock auto curve."; ;;
   max)  echo 0 > "$HWMON/pwm1_enable"; echo "fan set to FULL SPEED."; ;;
+  stock-read)
+    # Print the card's STOCK fan curve as "STOCK: T:PWM ..." WITHOUT changing the applied curve.
+    # There is no direct sysfs for the stock table; entering manual mode FROM auto copies stock
+    # into the user table, so we snapshot the user table, do that flip to reveal stock, read it,
+    # then restore the user's own curve + mode.
+    saved=""; for i in $(seq 1 "$NPOINTS"); do
+      t=$(cat "$HWMON/pwm1_auto_point${i}_temp" 2>/dev/null) || break
+      saved="$saved $(( t/1000 )):$(cat "$HWMON/pwm1_auto_point${i}_pwm")"
+    done
+    ena=$(cat "$HWMON/pwm1_enable")
+    echo 2 > "$HWMON/pwm1_enable" 2>/dev/null
+    echo 1 > "$HWMON/pwm1_enable" 2>/dev/null      # copies stock -> user table
+    stock=""; for i in $(seq 1 "$NPOINTS"); do
+      t=$(cat "$HWMON/pwm1_auto_point${i}_temp" 2>/dev/null) || break
+      stock="$stock $(( t/1000 )):$(cat "$HWMON/pwm1_auto_point${i}_pwm")"
+    done
+    [ -n "$saved" ] && "$0" set $saved >/dev/null 2>&1   # restore the user's curve
+    [ "$ena" = 1 ] || echo "$ena" > "$HWMON/pwm1_enable" 2>/dev/null
+    echo "STOCK:$stock"
+    ;;
   set)
     shift
     [ $# -ge 1 ] || { echo "give at least one T:PWM pair"; exit 1; }
