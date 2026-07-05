@@ -12,17 +12,26 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 Launch **Arc GPU Dashboard** from your apps menu, or run `xe-gpu-gui`.
 
 ## Dashboard tab
-Live (2 s) monitoring. The **GPU card** shows four core **metric tiles** — **Clock**, **Power
-draw**, **GPU temp**, **Fan** — each with a big value, a sub-line, and a **scrolling sparkline**.
-Alongside, a **Temperatures** card lists every sensor — the four mains (pkg / mctrl / pcie / vram)
-plus all VRAM channels — colour-graded through a 7-band gradient (**teal-green → amber → red**) by
-headroom to crit, with the whole tile border shifting colour with the heat.
+Live (2 s) monitoring, in three parts:
 
-**Metrics filter** (the *Metrics* button, top-right): a dropdown of checkboxes for **extra metric
-tiles** that are hidden by default — Actual clock, Min/Max clock, GPU power, Power cap, Power limit,
-Fan duty %, Fan mode, Throttle, Power profile. Tick any to add them under the core tiles; *All* /
-*None* toggle them in bulk. Your selection is **saved across launches**
-(`~/.config/xe-gpu-gui/config.json`). The core tiles and temperatures are always shown.
+**Specifications** (top) — the fixed limits & configuration, *not* live metrics: device, power cap,
+power limit (I1), clock limits, hardware clock range, power profile, fan mode.
+
+**Temperatures** (left) — every sensor (four mains: pkg / mctrl / pcie / vram, plus all VRAM
+channels), colour-graded through a 7-band gradient (**teal-green → amber → red**) by headroom to
+crit, with the whole tile border shifting colour with the heat.
+
+**Metrics** (right) — only values that *change*, as tiles with **scrolling sparklines**. Named after
+Intel Arc Control where a matching xe reading exists. The four core metrics are always shown — **GPU
+Frequency**, **GPU Card Power**, **GPU Temperature**, **GPU Fan Speed**. The **Metrics** button opens
+a dropdown of optional ones (hidden by default): GPU Actual Frequency, GPU Power, GPU Power Percent,
+GPU Fan Duty, GPU Temperature Percent, VRAM Temperature, and the limit indicators (GPU Power /
+Temperature / Voltage Limited). *All* / *None* toggle in bulk; the selection is **saved across
+launches** (`~/.config/xe-gpu-gui/config.json`).
+
+> Metrics Intel Arc Control shows that xe doesn't expose (GPU/VRAM utilization %, VRAM used/size,
+> VRAM bandwidth/frequency, per-engine render/compute/media, frame-latency/FPS) aren't available on
+> Linux — everything shown is real hardware telemetry, nothing synthetic.
 
 Fan controls live on the **Fan Control tab**. Power cap, clock limits & power profile live on the
 **Overclock tab** (all performance knobs in one place) — so with the `xe_gt_oc` patch the Dashboard

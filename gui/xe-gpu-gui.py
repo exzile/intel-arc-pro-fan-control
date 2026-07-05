@@ -147,14 +147,13 @@ class XeGpu:
     def energy2_uj(self):
         return _int(os.path.join(self.hwmon, "energy2_input")) if self.hwmon else None
 
-    def throttle_reason(self):
-        # freq0/throttle/reason_* are 0/1 flags (thermal, pl1/pl2/pl4, prochot, vr_tdc…);
-        # return the active reason's short name, or None if not throttling.
+    def throttle_flags(self):
+        # freq0/throttle/reason_* are 0/1 flags (thermal, pl1/pl2/pl4, prochot, vr_tdc…)
         tdir = os.path.join(self.card or "", "device/tile0/gt0/freq0/throttle")
-        for f in sorted(glob.glob(os.path.join(tdir, "reason_*"))):
-            if _read(f) == "1":
-                return os.path.basename(f)[len("reason_"):]
-        return None
+        out = {}
+        for f in glob.glob(os.path.join(tdir, "reason_*")):
+            out[os.path.basename(f)[len("reason_"):]] = (_read(f) == "1")
+        return out
 
     def fan(self):
         if not self.hwmon:
@@ -216,7 +215,7 @@ class XeGpu:
         return {"id": self.identity(), "clocks": self.clocks(), "power": self.power(),
                 "fan": self.fan(), "mains": self.temps_where(False),
                 "vram": self.temps_where(True), "energy": self.energy_uj(),
-                "energy2": self.energy2_uj(), "throttle": self.throttle_reason(),
+                "energy2": self.energy2_uj(), "throttle_flags": self.throttle_flags(),
                 "profile": self.power_profile()}
 
     def read_curve(self):
@@ -340,46 +339,86 @@ def _temp_label(lbl):
 
 
 class Metric:
-    def __init__(self, mid, label, unit, compute, spark=False, fixed=None, default=True, group="GPU"):
+    def __init__(self, mid, label, unit, compute, spark=False, fixed=None, default=True,
+                 group="GPU", core=False):
         self.id = mid; self.label = label; self.unit = unit; self.compute = compute
         self.spark = spark; self.fixed = fixed; self.default = default; self.group = group
+        self.core = core          # core metrics are always shown; others are filter-toggled
 
 
-def build_extra_metrics(sample):
-    """OPTIONAL extra metric tiles, hidden by default and shown via the Metrics filter.
-    The Dashboard's core tiles (Clock / Power draw / GPU temp / Fan) and the Temperatures
-    grid are always shown; these are the additional readouts. compute(data) -> dict."""
+def _temp_metric(lbl):
+    def f(d):
+        t = d["temp_by_label"].get(lbl)
+        if not t:
+            return {"text": "—"}
+        st, rgb = temp_style(t["c"], t["crit"])
+        return {"text": str(t["c"]), "val": t["c"], "state": st, "rgb": rgb,
+                "sub": (f"limit {t['crit']}°C" if t.get("crit") else None)}
+    return f
+
+
+def _temp_pct(d):
+    t = d["temp_by_label"].get("pkg")
+    if not t or not t.get("crit"):
+        return {"text": "—"}
+    p = round(t["c"] / t["crit"] * 100)
+    st, rgb = temp_style(t["c"], t["crit"])
+    return {"text": str(p), "val": p, "state": st, "rgb": rgb}
+
+
+def _limit(flag_keys):
+    def f(d):
+        on = any((d.get("throttle_flags") or {}).get(k) for k in flag_keys)
+        return {"text": "yes", "state": "tb5", "rgb": _BAND_RGB["tb5"]} if on else {"text": "no"}
+    return f
+
+
+def build_metrics(sample):
+    """Live METRICS (values that change) — core ones are always shown, the rest are
+    toggled via the Metrics filter. Names follow Intel Arc Control where a matching
+    reading exists in xe sysfs. Fixed limits/config live in the Specifications section."""
     rp0 = (sample.get("clocks") or {}).get("rp0") or 2400
     return [
-        Metric("clock_act", "Actual clock", "MHz",
+        # --- core (always shown) ---
+        Metric("freq", "GPU Frequency", "MHz",
+               lambda d: {"text": _num(d["clocks"].get("cur")), "val": d["clocks"].get("cur")},
+               spark=True, fixed=(0, rp0), core=True),
+        Metric("power_card", "GPU Card Power", "W",
+               lambda d: {"text": (f"{d['draw_card']:.0f}" if d.get("draw_card") is not None else "—"),
+                          "val": d.get("draw_card")}, spark=True, core=True),
+        Metric("temp_gpu", "GPU Temperature", "°C", _temp_metric("pkg"),
+               spark=True, fixed=(20, 110), core=True),
+        Metric("fan", "GPU Fan Speed", "rpm",
+               lambda d: {"text": _num(d["fan"].get("rpm")), "val": d["fan"].get("rpm")},
+               spark=True, core=True),
+        # --- optional (filter, hidden by default) ---
+        Metric("freq_act", "GPU Actual Frequency", "MHz",
                lambda d: {"text": _num(d["clocks"].get("act")), "val": d["clocks"].get("act")},
                spark=True, fixed=(0, rp0), default=False, group="Clocks"),
-        Metric("clk_min", "Min clock", "MHz",
-               lambda d: {"text": _num(d["clocks"].get("min"))}, default=False, group="Clocks"),
-        Metric("clk_max", "Max clock", "MHz",
-               lambda d: {"text": _num(d["clocks"].get("max"))}, default=False, group="Clocks"),
-        Metric("power_gpu", "GPU power", "W",
+        Metric("power_gpu", "GPU Power", "W",
                lambda d: {"text": (f"{d['draw_pkg']:.0f}" if d.get("draw_pkg") is not None else "—"),
                           "val": d.get("draw_pkg")}, spark=True, default=False, group="Power"),
-        Metric("power_cap", "Power cap", "W",
-               lambda d: {"text": _num(d["power"].get("cap_w"))}, default=False, group="Power"),
-        Metric("power_limit", "Power limit", "W",
-               lambda d: {"text": (f"{d['power']['crit_w']:.0f}" if d["power"].get("crit_w") else "—")},
-               default=False, group="Power"),
-        Metric("fan_duty", "Fan duty", "%",
+        Metric("power_pct", "GPU Power Percent", "%",
+               lambda d: ({"text": str(round(d["draw_card"] / d["power"]["cap_w"] * 100)),
+                           "val": round(d["draw_card"] / d["power"]["cap_w"] * 100)}
+                          if d.get("draw_card") is not None and d["power"].get("cap_w") else {"text": "—"}),
+               spark=True, fixed=(0, 100), default=False, group="Power"),
+        Metric("fan_pct", "GPU Fan Duty", "%",
                lambda d: {"text": (str(round((d["fan"].get("duty") or 0) / 255 * 100))
                                    if d["fan"].get("duty") is not None else "—"),
                           "val": (round((d["fan"].get("duty") or 0) / 255 * 100)
                                   if d["fan"].get("duty") is not None else None)},
-               spark=True, default=False, group="Fan"),
-        Metric("fan_mode", "Fan mode", "",
-               lambda d: {"text": d["fan"].get("mode", "?")}, default=False, group="Fan"),
-        Metric("throttle", "Throttle", "",
-               lambda d: ({"text": d["throttle"], "state": "tb5", "rgb": _BAND_RGB["tb5"]}
-                          if d.get("throttle") else {"text": "no"}), default=False, group="Status"),
-        Metric("profile", "Power profile", "",
-               lambda d: {"text": ((d.get("profile") or {}).get("current") or "—")},
-               default=False, group="Status"),
+               spark=True, fixed=(0, 100), default=False, group="Fan"),
+        Metric("temp_pct", "GPU Temperature Percent", "%", _temp_pct,
+               spark=True, fixed=(0, 100), default=False, group="Temperature"),
+        Metric("temp_vram", "VRAM Temperature", "°C", _temp_metric("vram"),
+               spark=True, fixed=(20, 110), default=False, group="Temperature"),
+        Metric("lim_power", "GPU Power Limited", "", _limit(("pl1", "pl2", "pl4")),
+               default=False, group="Limit indicators"),
+        Metric("lim_temp", "GPU Temperature Limited", "", _limit(("thermal",)),
+               default=False, group="Limit indicators"),
+        Metric("lim_volt", "GPU Voltage Limited", "", _limit(("vr_tdc",)),
+               default=False, group="Limit indicators"),
     ]
 
 
@@ -1644,45 +1683,66 @@ class Window(Adw.ApplicationWindow):
 
     def _build_dashboard(self):
         sample = self.gpu.snapshot()
-        self.extra_metrics = build_extra_metrics(sample)
+        self.metrics = build_metrics(sample)
+        self.metric_by_id = {m.id: m for m in self.metrics}
+        self._extras = [m for m in self.metrics if not m.core]
         saved = load_config().get("metrics", {})
-        self.visible = {m.id: bool(saved.get(m.id, m.default)) for m in self.extra_metrics}
+        self.visible = {m.id: bool(saved.get(m.id, m.default)) for m in self._extras}
         self.tiles = {}
         self._energy_prev = {}
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
                        margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
-        hdr = Gtk.Box(spacing=8)
-        hdr.append(Gtk.Box(hexpand=True))          # push the filter button to the right
-        hdr.append(self._build_filter_button())
-        page.append(hdr)
-        dash = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self._build_specs(page)                    # fixed values, on top
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12); left.set_size_request(360, -1)
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True)
-        dash.append(left); dash.append(right)
-        self._build_stats(left); self._build_controls(left); self._build_temps(right)
-        page.append(dash)
+        row.append(left); row.append(right)
+        self._build_temps(left)                    # Temperatures on the left
+        self._build_metrics_card(right)            # live Metrics on the right
+        page.append(row)
+        self._build_controls(page)                 # power/clock card only when there's no OC tab
         return page
 
-    def _extra_visible(self, child):
-        return self.visible.get(getattr(child.get_child(), "metric_id", None), False)
+    def _metric_visible(self, child):
+        mid = getattr(child.get_child(), "metric_id", None)
+        m = self.metric_by_id.get(mid)
+        return bool(m and (m.core or self.visible.get(mid, False)))
+
+    def _build_metrics_card(self, parent):
+        c = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8); c.add_css_class("card2")
+        c.set_hexpand(True); c.set_vexpand(True)
+        head = Gtk.Box(spacing=6)
+        t = Gtk.Label(label="METRICS", xalign=0, hexpand=True); t.add_css_class("section")
+        head.append(t); head.append(self._build_filter_button())
+        c.append(head)
+        self.flow = Gtk.FlowBox(column_spacing=10, row_spacing=10, homogeneous=True,
+                                min_children_per_line=2, max_children_per_line=3,
+                                selection_mode=Gtk.SelectionMode.NONE)
+        self.flow.set_filter_func(self._metric_visible)
+        for m in self.metrics:
+            tile = MetricTile(m.label, m.unit, spark=m.spark, fixed=m.fixed)
+            tile.metric_id = m.id
+            self.tiles[m.id] = tile
+            self.flow.append(tile)
+        c.append(self.flow); parent.append(c)
 
     def _build_filter_button(self):
-        btn = Gtk.MenuButton(tooltip_text="Show/hide extra metric tiles (saved across launches)")
+        btn = Gtk.MenuButton(tooltip_text="Show/hide optional metrics (saved across launches)")
         btn.set_child(Adw.ButtonContent(icon_name="view-list-symbolic", label="Metrics"))
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
                       margin_start=8, margin_end=8, margin_top=8, margin_bottom=8)
-        cap = Gtk.Label(label="Extra metric tiles (the core stats + temperatures are always shown)",
+        cap = Gtk.Label(label="Optional metrics (the core four are always shown)",
                         xalign=0, wrap=True, max_width_chars=30); cap.add_css_class("msub")
         box.append(cap)
         row = Gtk.Box(spacing=6, margin_top=4)
-        row.append(icon_button("edit-select-all-symbolic", "Show all extra metrics",
+        row.append(icon_button("edit-select-all-symbolic", "Show all",
                                lambda *_: self._filter_bulk(True), label="All"))
-        row.append(icon_button("edit-clear-all-symbolic", "Hide all extra metrics",
+        row.append(icon_button("edit-clear-all-symbolic", "Hide all",
                                lambda *_: self._filter_bulk(False), label="None"))
         box.append(row)
         self._filter_checks = {}
         lastgroup = None
-        for m in self.extra_metrics:
+        for m in self._extras:
             if m.group != lastgroup:
                 gl = Gtk.Label(label=m.group.upper(), xalign=0); gl.add_css_class("filter-group")
                 box.append(gl); lastgroup = m.group
@@ -1691,48 +1751,40 @@ class Window(Adw.ApplicationWindow):
             cb.connect("toggled", self._on_filter_toggle, m.id)
             self._filter_checks[m.id] = cb
             box.append(cb)
-        pop = Gtk.Popover(); pop.set_child(box)
+        fsw = Gtk.ScrolledWindow(propagate_natural_width=True)
+        fsw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        fsw.set_max_content_height(420); fsw.set_child(box)
+        pop = Gtk.Popover(); pop.set_child(fsw)
         btn.set_popover(pop)
         return btn
 
     def _on_filter_toggle(self, cb, mid):
         self.visible[mid] = cb.get_active()
-        self._persist_filter(); self.extra_flow.invalidate_filter()
+        self._persist_filter(); self.flow.invalidate_filter()
 
     def _filter_bulk(self, val):
-        for m in self.extra_metrics:
+        for m in self._extras:
             self.visible[m.id] = val
             self._filter_checks[m.id].set_active(val)
-        self._persist_filter(); self.extra_flow.invalidate_filter()
+        self._persist_filter(); self.flow.invalidate_filter()
 
     def _persist_filter(self):
         cfg = load_config(); cfg["metrics"] = self.visible; save_config(cfg)
 
-    def _build_stats(self, parent):
-        c = card("GPU", "Live readings — Intel Arc (xe) driver via sysfs.")
-        self.v_id = Gtk.Label(xalign=0); self.v_id.add_css_class("dim"); self.v_id.set_wrap(True)
-        c.append(self.v_id)
-        g = Gtk.Grid(column_spacing=10, row_spacing=10, column_homogeneous=True)
-        cl = self.gpu.clocks()
-        self.m_clock = MetricTile("Clock", "MHz", fixed=(0, cl.get("rp0") or 2400))
-        self.m_power = MetricTile("Power draw", "W")
-        self.m_temp = MetricTile("GPU temp", "°C", fixed=(20, 100))
-        self.m_fan = MetricTile("Fan", "rpm")
-        for i, t in enumerate((self.m_clock, self.m_power, self.m_temp, self.m_fan)):
-            g.attach(t, i % 2, i // 2, 1, 1)
-        c.append(g)
-        # optional extra metric tiles — hidden until enabled via the Metrics filter
-        self.extra_flow = Gtk.FlowBox(column_spacing=10, row_spacing=10, homogeneous=True,
-                                      min_children_per_line=2, max_children_per_line=2,
-                                      selection_mode=Gtk.SelectionMode.NONE, margin_top=10)
-        self.extra_flow.set_filter_func(self._extra_visible)
-        for m in self.extra_metrics:
-            tile = MetricTile(m.label, m.unit, spark=m.spark, fixed=m.fixed)
-            tile.metric_id = m.id
-            self.tiles[m.id] = tile
-            self.extra_flow.append(tile)
-        c.append(self.extra_flow)
-        parent.append(c)
+    def _build_specs(self, parent):
+        c = card("Specifications", "Fixed limits & configuration — not live metrics.")
+        self.spec_rows = {}
+        g = Gtk.Grid(column_spacing=18, row_spacing=6)
+        rows = [("device", "Device"), ("cap", "Power cap"), ("limit", "Power limit (I1)"),
+                ("clk", "Clock limits"), ("hw", "Hardware range"), ("profile", "Power profile"),
+                ("fan", "Fan mode")]
+        for i, (key, label) in enumerate(rows):
+            col = (i % 2) * 2; r = i // 2
+            k = Gtk.Label(label=label, xalign=0); k.add_css_class("dim")
+            v = Gtk.Label(label="—", xalign=0); v.add_css_class("cval")
+            g.attach(k, col, r, 1, 1); g.attach(v, col + 1, r, 1, 1)
+            self.spec_rows[key] = v
+        c.append(g); parent.append(c)
 
     def _build_temps(self, parent):
         c = card("Temperatures", "All sensors the driver exposes. Colour = headroom to the crit limit.")
@@ -1902,40 +1954,19 @@ class Window(Adw.ApplicationWindow):
         data["draw_card"] = self._power_draw("card", data.get("energy"))
         data["draw_pkg"] = self._power_draw("pkg", data.get("energy2"))
         data["temp_by_label"] = {t["label"]: t for t in data["mains"] + data["vram"]}
-        ident = data["id"]
-        self.v_id.set_markup(f"<b>{ident['card']}</b>  <span alpha='55%'>{ident['pci']} · "
-                             f"{ident['id']}</span>")
-        # --- core tiles (the original 4) ---
-        cl = data["clocks"]; cur, act = cl.get("cur"), cl.get("act")
-        thr = f" · throttling: {data['throttle']}" if data.get("throttle") else ""
-        csub = f"{cl.get('min','?')}–{cl.get('max','?')} MHz{thr}"
-        if act:
-            csub = f"act {act} · " + csub
-        self.m_clock.update(str(cur) if cur is not None else "—", spark_val=cur,
-                            rgb=(0.28, 0.56, 0.95), sub=csub)
-        cap = data["power"].get("cap_w"); watts = data.get("draw_card")
-        if watts is not None:
-            self.m_power.update(f"{watts:.0f}", spark_val=watts, rgb=(0.72, 0.45, 0.96),
-                                sub=(f"cap {cap} W" if cap else None))
-        else:
-            self.m_power.update(str(cap) if cap else "—", rgb=(0.72, 0.45, 0.96), sub="cap (W)")
-        pkg = data["temp_by_label"].get("pkg")
-        if pkg:
-            st, srgb = temp_style(pkg["c"], pkg["crit"])
-            self.m_temp.update(str(pkg["c"]), spark_val=pkg["c"], rgb=srgb, state=st,
-                               sub=(f"limit {pkg['crit']}°C" if pkg.get("crit") else None))
-            self.editor.cur_pkg = pkg["c"]
-        fn = data["fan"]; rpm = fn.get("rpm"); duty = fn.get("duty")
-        dpct = round((duty or 0) / 255 * 100) if duty is not None else None
-        fsub = fn.get("mode", "?") if dpct is None else f"{dpct}% · {fn.get('mode','?')}"
-        self.m_fan.update(str(rpm) if rpm is not None else "—", spark_val=rpm,
-                          rgb=(0.16, 0.74, 0.62), sub=fsub)
-        if getattr(self, "oc_view", None) is not None:
-            self.oc_view.set_telemetry(cur, pkg["c"] if pkg else None, rpm)
-        # --- extra tiles (compute only the enabled ones; others stay hidden) ---
-        for m in self.extra_metrics:
+        # --- Specifications (fixed values) ---
+        ident = data["id"]; pw = data["power"]; cl = data["clocks"]; prof = data.get("profile") or {}
+        self.spec_rows["device"].set_text(f"{ident['card']} · {ident['id']}")
+        self.spec_rows["cap"].set_text(f"{pw['cap_w']} W" if pw.get("cap_w") else "—")
+        self.spec_rows["limit"].set_text(f"{pw['crit_w']:.0f} W" if pw.get("crit_w") else "—")
+        self.spec_rows["clk"].set_text(f"{cl.get('min','—')}–{cl.get('max','—')} MHz")
+        self.spec_rows["hw"].set_text(f"{cl.get('rpn','—')}–{cl.get('rp0','—')} MHz")
+        self.spec_rows["profile"].set_text(prof.get("current", "—"))
+        self.spec_rows["fan"].set_text(data["fan"].get("mode", "—"))
+        # --- Metrics (core always, extras only when enabled) ---
+        for m in self.metrics:
             tile = self.tiles.get(m.id)
-            if tile is None or not self.visible.get(m.id):
+            if tile is None or (not m.core and not self.visible.get(m.id)):
                 continue
             try:
                 r = m.compute(data)
@@ -1943,6 +1974,11 @@ class Window(Adw.ApplicationWindow):
                 r = {"text": "—"}
             tile.update(r.get("text", "—"), spark_val=(r.get("val") if m.spark else None),
                         rgb=r.get("rgb"), state=r.get("state"), sub=r.get("sub"))
+        pkg = data["temp_by_label"].get("pkg")
+        if pkg:
+            self.editor.cur_pkg = pkg["c"]
+        if getattr(self, "oc_view", None) is not None:
+            self.oc_view.set_telemetry(cl.get("cur"), pkg["c"] if pkg else None, data["fan"].get("rpm"))
         # --- temperatures grid ---
         mains = {t["label"]: t for t in data["mains"]}
         hottest = max((t["c"] for t in data["mains"] + data["vram"]), default=None)
