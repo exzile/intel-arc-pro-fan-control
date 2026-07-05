@@ -1,0 +1,12 @@
+[Unit]
+Description=Arc GPU VRAM-usage exporter (debugfs vram_mm -> /run/xe-gpu-vram)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/xe-gpu-vramd
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

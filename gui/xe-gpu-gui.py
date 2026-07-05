@@ -132,6 +132,18 @@ class XeGpu:
     def energy2_uj(self):
         return _int(os.path.join(self.hwmon, "energy2_input")) if self.hwmon else None
 
+    def vram(self):
+        # VRAM used/total bytes, exported by xe-gpu-vram.service (from root-only debugfs)
+        raw = _read("/run/xe-gpu-vram")
+        if not raw:
+            return None
+        p = raw.split()
+        try:
+            used, total = int(p[0]), int(p[1])
+        except (IndexError, ValueError):
+            return None
+        return {"used": used, "total": total} if total > 0 else None
+
     def throttle_flags(self):
         # freq0/throttle/reason_* are 0/1 flags (thermal, pl1/pl2/pl4, prochot, vr_tdc…)
         tdir = os.path.join(self.card or "", "device/tile0/gt0/freq0/throttle")
@@ -201,7 +213,7 @@ class XeGpu:
                 "fan": self.fan(), "mains": self.temps_where(False),
                 "vram": self.temps_where(True), "energy": self.energy_uj(),
                 "energy2": self.energy2_uj(), "throttle_flags": self.throttle_flags(),
-                "profile": self.power_profile()}
+                "profile": self.power_profile(), "vram": self.vram()}
 
     def read_curve(self):
         pts = []
@@ -396,6 +408,17 @@ def build_metrics(sample):
                spark=True, fixed=(0, 100), default=False, group="Fan"),
         Metric("temp_pct", "GPU Temperature Percent", "%", _temp_pct,
                spark=True, fixed=(0, 100), default=False, group="Temperature"),
+        Metric("vram_used", "VRAM Used", "GiB",
+               lambda d: ({"text": f"{d['vram']['used'] / 1073741824:.1f}",
+                           "val": d["vram"]["used"] / 1073741824}
+                          if d.get("vram") else {"text": "—", "sub": "needs xe-gpu-vram.service"}),
+               spark=True, fixed=(0, ((sample.get("vram") or {}).get("total") or 25_769_803_776) / 1073741824),
+               default=False, group="VRAM"),
+        Metric("vram_pct", "VRAM Usage", "%",
+               lambda d: ({"text": str(round(d["vram"]["used"] / d["vram"]["total"] * 100)),
+                           "val": round(d["vram"]["used"] / d["vram"]["total"] * 100)}
+                          if d.get("vram") else {"text": "—", "sub": "needs xe-gpu-vram.service"}),
+               spark=True, fixed=(0, 100), default=False, group="VRAM"),
     ]
 
 
@@ -1787,10 +1810,10 @@ class Window(Adw.ApplicationWindow):
         flow = Gtk.FlowBox(column_spacing=24, row_spacing=8, homogeneous=False,
                            min_children_per_line=2, max_children_per_line=8,
                            selection_mode=Gtk.SelectionMode.NONE)
-        rows = [("device", "Device"), ("cap", "Power cap"), ("limit", "Power limit (I1)"),
-                ("clk", "Clock limits"), ("hw", "Hardware range"), ("profile", "Power profile"),
-                ("fan", "Fan mode"), ("power_lim", "Power limited"), ("temp_lim", "Temp limited"),
-                ("volt_lim", "Voltage limited")]
+        rows = [("device", "Device"), ("vram", "VRAM"), ("cap", "Power cap"),
+                ("limit", "Power limit (I1)"), ("clk", "Clock limits"), ("hw", "Hardware range"),
+                ("profile", "Power profile"), ("fan", "Fan mode"), ("power_lim", "Power limited"),
+                ("temp_lim", "Temp limited"), ("volt_lim", "Voltage limited")]
         for key, label in rows:
             item = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
             k = Gtk.Label(label=label, xalign=0); k.add_css_class("specitem-label")
@@ -1935,6 +1958,8 @@ class Window(Adw.ApplicationWindow):
         # --- Specifications (fixed values) ---
         ident = data["id"]; pw = data["power"]; cl = data["clocks"]; prof = data.get("profile") or {}
         self.spec_rows["device"].set_text(f"{ident['card']} · {ident['id']}")
+        vr = data.get("vram")
+        self.spec_rows["vram"].set_text(f"{vr['total'] / 1073741824:.1f} GiB" if vr else "—")
         self.spec_rows["cap"].set_text(f"{pw['cap_w']} W" if pw.get("cap_w") else "—")
         self.spec_rows["limit"].set_text(f"{pw['crit_w']:.0f} W" if pw.get("crit_w") else "—")
         self.spec_rows["clk"].set_text(f"{cl.get('min','—')}–{cl.get('max','—')} MHz")

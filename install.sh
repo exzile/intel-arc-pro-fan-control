@@ -16,7 +16,7 @@ cd "$(dirname "$(readlink -f "$0")")"
 
 # CLI helpers -> /usr/local/bin (basename without the .sh)
 BIN=/usr/local/bin
-for f in xe-fan-curve xe-gpu-tune xe-gpu-temps xe-gpu xe-gpu-oc xe-gpu-stress; do
+for f in xe-fan-curve xe-gpu-tune xe-gpu-temps xe-gpu xe-gpu-oc xe-gpu-stress xe-gpu-vramd; do
   if [ -f "scripts/$f.sh" ]; then
     install -m755 "scripts/$f.sh" "$BIN/$f"
     echo "  installed $BIN/$f"
@@ -39,6 +39,15 @@ if [ -f gui/xe-gpu-gui.desktop ] && [ -n "$USER_HOME" ]; then
   chown "${SUDO_USER:-$USER}" "$APPS/xe-gpu-gui.desktop" 2>/dev/null || true
   update-desktop-database "$APPS" 2>/dev/null || true
   echo "  installed $APPS/xe-gpu-gui.desktop"
+fi
+
+# VRAM-usage exporter service (exposes only the VRAM figure from root-only debugfs
+# to /run/xe-gpu-vram so the GUI can show a live VRAM-usage metric)
+if [ -f systemd/xe-gpu-vram.service ] && command -v systemctl >/dev/null 2>&1; then
+  install -m644 systemd/xe-gpu-vram.service /etc/systemd/system/xe-gpu-vram.service
+  systemctl daemon-reload
+  systemctl enable --now xe-gpu-vram.service 2>/dev/null || true
+  echo "  installed + enabled xe-gpu-vram.service (VRAM usage -> /run/xe-gpu-vram)"
 fi
 
 echo "install.sh: done. Launch 'Arc GPU Dashboard' from the apps menu, or run xe-gpu-gui."
