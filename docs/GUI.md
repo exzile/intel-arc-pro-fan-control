@@ -12,20 +12,17 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 Launch **Arc GPU Dashboard** from your apps menu, or run `xe-gpu-gui`.
 
 ## Dashboard tab
-A Windows-style **metric board** — a scrollable grid of live (2 s) **metric tiles** covering
-everything the driver exposes (~29 on a B60): GPU clock, actual clock, min/max clock, **card power
-draw** and **GPU power draw** (derived from the energy counters), power cap/limit, fan speed, fan
-duty %, fan mode, throttle status (with reason: thermal / pl1 / …), power profile, and **every
-temperature sensor** — the four mains (GPU / VRAM / Mem ctrl / PCIe) plus all VRAM channels.
+Live (2 s) monitoring. The **GPU card** shows four core **metric tiles** — **Clock**, **Power
+draw**, **GPU temp**, **Fan** — each with a big value, a sub-line, and a **scrolling sparkline**.
+Alongside, a **Temperatures** card lists every sensor — the four mains (pkg / mctrl / pcie / vram)
+plus all VRAM channels — colour-graded through a 7-band gradient (**teal-green → amber → red**) by
+headroom to crit, with the whole tile border shifting colour with the heat.
 
-Each tile shows a big value, a sub-line, and — for time-series metrics — a **scrolling sparkline**.
-Temperatures colour-grade through a 7-band gradient (**teal-green → amber → red**) by headroom to
-crit, with the whole tile border shifting colour with the heat.
-
-**Metrics filter** (the *Metrics* button, top-right): tick exactly which metrics to show. The
-choice is **saved across launches** (`~/.config/xe-gpu-gui/config.json`) — *All* / *None* /
-*Defaults* buttons included. By default ~12 core metrics are shown and the individual VRAM channels
-are hidden; enable whichever you want.
+**Metrics filter** (the *Metrics* button, top-right): a dropdown of checkboxes for **extra metric
+tiles** that are hidden by default — Actual clock, Min/Max clock, GPU power, Power cap, Power limit,
+Fan duty %, Fan mode, Throttle, Power profile. Tick any to add them under the core tiles; *All* /
+*None* toggle them in bulk. Your selection is **saved across launches**
+(`~/.config/xe-gpu-gui/config.json`). The core tiles and temperatures are always shown.
 
 Fan controls live on the **Fan Control tab**. Power cap, clock limits & power profile live on the
 **Overclock tab** (all performance knobs in one place) — so with the `xe_gt_oc` patch the Dashboard
