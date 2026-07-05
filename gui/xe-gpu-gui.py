@@ -387,10 +387,14 @@ class CurveEditor(Gtk.Box):
         geo = self._plot(self.area.get_width(), self.area.get_height())
         t, p = self._to_data(sx + dx, sy + dy, geo)
         pts = self.points
-        lo = pts[self._drag - 1][0] + 1 if self._drag > 0 else TMIN
-        hi = pts[self._drag + 1][0] - 1 if self._drag < len(pts) - 1 else TMAX
-        pts[self._drag][0] = int(max(lo, min(hi, t)))
-        pts[self._drag][1] = int(round(p))
+        i = self._drag
+        lo = pts[i - 1][0] + 1 if i > 0 else TMIN
+        hi = pts[i + 1][0] - 1 if i < len(pts) - 1 else TMAX
+        # PWM must be non-decreasing (driver rejects a curve where speed drops as temp rises)
+        lop = pts[i - 1][1] if i > 0 else 0
+        hip = pts[i + 1][1] if i < len(pts) - 1 else 255
+        pts[i][0] = int(max(lo, min(hi, t)))
+        pts[i][1] = int(max(lop, min(hip, round(p))))
         self._update_hint()
         self.area.queue_draw()
         self._mark()

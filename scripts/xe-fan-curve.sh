@@ -64,22 +64,30 @@ case "${1:-show}" in
     # manual mode FIRST (auto_point writes are rejected otherwise). Only switch if
     # needed — the driver returns EINVAL on writing pwm1_enable=1 when already 1.
     [ "$(cat "$HWMON/pwm1_enable" 2>/dev/null)" = 1 ] || echo 1 > "$HWMON/pwm1_enable"
-    # fill all NPOINTS slots: use given points, then repeat the last (temp climbs +1C, pwm held)
-    # to keep the whole table strictly monotonic in temp.
-    prev_t=-1
+    # Fill the fan-table slots: given points, then repeat the last (temp climbs +1C, pwm held).
+    # Two hardware rules the driver enforces (else EINVAL on the committing write):
+    #  - BOTH temp AND pwm must be non-decreasing across points -> clamp each >= the previous.
+    #  - only the first `point_count` slots are writable even though 10 sysfs files exist; the
+    #    firmware commits the table when the LAST valid point is written. Writing past that count
+    #    EINVALs *after* the curve is already applied, so tolerate a trailing write failure and
+    #    only fail if fewer than the user's own points were accepted.
+    prev_t=-1; prev_p=0; applied=0
     for i in $(seq 1 "$NPOINTS"); do
       if [ "$i" -le "$n" ]; then
         t=${TT[$((i-1))]}; p=${PP[$((i-1))]}
       else
         t=$(( prev_t/1000 + 1 )); p=${PP[$((n-1))]}   # pad above last point
       fi
-      # enforce monotonic temp
       tm=$(( t*1000 ))
-      if [ "$tm" -le "$prev_t" ]; then tm=$(( prev_t + 1000 )); fi
-      echo "$tm" > "$HWMON/pwm1_auto_point${i}_temp"
-      echo "$p"  > "$HWMON/pwm1_auto_point${i}_pwm"
-      prev_t=$tm
+      [ "$tm" -gt "$prev_t" ] || tm=$(( prev_t + 1000 ))   # strictly increasing temp
+      [ "$p"  -ge "$prev_p" ] || p=$prev_p                 # non-decreasing pwm
+      echo "$tm" > "$HWMON/pwm1_auto_point${i}_temp" 2>/dev/null || true
+      if ! echo "$p" > "$HWMON/pwm1_auto_point${i}_pwm" 2>/dev/null; then
+        break   # slot beyond the hardware point count; the table already committed
+      fi
+      applied=$i; prev_t=$tm; prev_p=$p
     done
+    [ "$applied" -ge "$n" ] || { echo "error: only $applied of $n points were accepted"; exit 1; }
     echo "applied custom curve:"; show
     ;;
   boot)
