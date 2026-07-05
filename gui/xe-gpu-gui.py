@@ -213,7 +213,7 @@ class XeGpu:
                 "fan": self.fan(), "mains": self.temps_where(False),
                 "vram": self.temps_where(True), "energy": self.energy_uj(),
                 "energy2": self.energy2_uj(), "throttle_flags": self.throttle_flags(),
-                "profile": self.power_profile(), "vram": self.vram()}
+                "profile": self.power_profile(), "vmem": self.vram()}
 
     def read_curve(self):
         pts = []
@@ -409,15 +409,15 @@ def build_metrics(sample):
         Metric("temp_pct", "GPU Temperature Percent", "%", _temp_pct,
                spark=True, fixed=(0, 100), default=False, group="Temperature"),
         Metric("vram_used", "VRAM Used", "GiB",
-               lambda d: ({"text": f"{d['vram']['used'] / 1073741824:.1f}",
-                           "val": d["vram"]["used"] / 1073741824}
-                          if d.get("vram") else {"text": "—", "sub": "needs xe-gpu-vram.service"}),
-               spark=True, fixed=(0, ((sample.get("vram") or {}).get("total") or 25_769_803_776) / 1073741824),
+               lambda d: ({"text": f"{d['vmem']['used'] / 1073741824:.1f}",
+                           "val": d["vmem"]["used"] / 1073741824}
+                          if d.get("vmem") else {"text": "—", "sub": "needs xe-gpu-vram.service"}),
+               spark=True, fixed=(0, ((sample.get("vmem") or {}).get("total") or 25_769_803_776) / 1073741824),
                default=False, group="VRAM"),
         Metric("vram_pct", "VRAM Usage", "%",
-               lambda d: ({"text": str(round(d["vram"]["used"] / d["vram"]["total"] * 100)),
-                           "val": round(d["vram"]["used"] / d["vram"]["total"] * 100)}
-                          if d.get("vram") else {"text": "—", "sub": "needs xe-gpu-vram.service"}),
+               lambda d: ({"text": str(round(d["vmem"]["used"] / d["vmem"]["total"] * 100)),
+                           "val": round(d["vmem"]["used"] / d["vmem"]["total"] * 100)}
+                          if d.get("vmem") else {"text": "—", "sub": "needs xe-gpu-vram.service"}),
                spark=True, fixed=(0, 100), default=False, group="VRAM"),
     ]
 
@@ -1958,7 +1958,7 @@ class Window(Adw.ApplicationWindow):
         # --- Specifications (fixed values) ---
         ident = data["id"]; pw = data["power"]; cl = data["clocks"]; prof = data.get("profile") or {}
         self.spec_rows["device"].set_text(f"{ident['card']} · {ident['id']}")
-        vr = data.get("vram")
+        vr = data.get("vmem")
         self.spec_rows["vram"].set_text(f"{vr['total'] / 1073741824:.1f} GiB" if vr else "—")
         self.spec_rows["cap"].set_text(f"{pw['cap_w']} W" if pw.get("cap_w") else "—")
         self.spec_rows["limit"].set_text(f"{pw['crit_w']:.0f} W" if pw.get("crit_w") else "—")
