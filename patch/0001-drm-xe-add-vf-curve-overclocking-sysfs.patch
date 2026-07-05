@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Joey Pongallo <joeypongallo@gmail.com>
 Date: Sun, 5 Jul 2026 02:40:00 -0400
-Subject: [PATCH] drm/xe: expose voltage-frequency curve overclocking via sysfs
+Subject: [PATCH] drm/xe: expose voltage-frequency curve + memory-speed OC via sysfs
 
 Battlemage discrete GPUs (e.g. Arc Pro B60/B70) expose an 85-point
 voltage-frequency (VF) curve through the PCODE "late-binding" interface.
@@ -34,10 +34,18 @@ voltage is clamped to a conservative [400, 1200] mV window. The whole
 transaction runs under a runtime-PM reference so it works while the GPU
 is autosuspended.
 
-The transaction and packing were derived by tracing the vendor driver's
+A second attribute exposes the GDDR6 memory data rate:
+
+    <device>/tile0/gt0/oc/mem_speed
+
+in Mbps (19000 = 19 Gbps), via LATE_BINDING domain 0x17 -- write
+PCODE_MBOX(0x5e, 6, 0x17) DATA0=Mbps then commit PCODE_MBOX(0x5e, 8, 0x17);
+read PCODE_MBOX(0x5e, 5, 0x17). Clamped to [14000, 24000] Mbps.
+
+The transactions and packing were derived by tracing the vendor driver's
 PCODE mailbox activity (igdkmdnd64 fn issuing the mailbox writes) and
-confirmed by replaying it on an Arc Pro B60: reads match the vendor
-values, a written point reads back changed, and the curve restores
+confirmed by replaying them on an Arc Pro B60: reads match the vendor
+values, a written point/speed reads back changed, and reset restores
 cleanly with no instability.
 
 Signed-off-by: Joey Pongallo <joeypongallo@gmail.com>

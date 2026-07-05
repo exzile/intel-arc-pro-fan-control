@@ -190,6 +190,16 @@ class XeGpu:
                     return 0
         return 0
 
+    def mem_node(self):
+        return os.path.join(self.card or "_", "device/tile0/gt0/oc/mem_speed")
+
+    @property
+    def mem_available(self):
+        return os.path.exists(self.mem_node())
+
+    def read_mem_speed(self):
+        return _int(self.mem_node())   # Mbps, or None
+
 
 PRESETS = {
     "Silent":     [[40, 0], [55, 45], [70, 100], [82, 170], [90, 255]],
@@ -571,6 +581,24 @@ class VoltageCurveView(Gtk.Box):
         row.append(Gtk.Label(label="mV"))
         self.append(row)
 
+        # VRAM memory speed (only if the patch exposes oc/mem_speed)
+        self.mem_spin = None
+        self.mem_applied = 0
+        if self.gpu.mem_available:
+            mrow = Gtk.Box(spacing=10)
+            mlab = Gtk.Label(label="Memory speed", xalign=0); mlab.add_css_class("section")
+            mrow.append(mlab)
+            self.mem_spin = Gtk.SpinButton(
+                adjustment=Gtk.Adjustment(lower=14.0, upper=24.0, step_increment=0.1, value=19.0),
+                digits=2, valign=Gtk.Align.CENTER)
+            self.mem_spin.set_numeric(True)
+            self.mem_spin.set_tooltip_text("GDDR6 memory data rate (Gbps). Higher = more VRAM bandwidth; "
+                                           "raise cautiously.")
+            self.mem_spin.connect("value-changed", lambda *_: (self._hint(), self._mark()))
+            mrow.append(self.mem_spin)
+            mrow.append(Gtk.Label(label="Gbps"))
+            self.append(mrow)
+
         bar = Gtk.Box(spacing=8)
         self.hint = Gtk.Label(xalign=0, hexpand=True); self.hint.add_css_class("dim")
         bar.append(self.hint)
@@ -587,7 +615,8 @@ class VoltageCurveView(Gtk.Box):
         note = Gtk.Label(
             label="The GPU voltage-frequency curve — X = frequency step (idle → max), Y = voltage. "
                   "Slide left to undervolt (−mV: cooler, more efficient) or right to overvolt "
-                  "(+mV: headroom for higher clocks), then Apply. Reset restores stock.",
+                  "(+mV: headroom for higher clocks). Memory speed sets the GDDR6 data rate (Gbps). "
+                  "Apply saves your choice (re-applied at boot); Reset restores stock.",
             xalign=0, wrap=True)
         note.add_css_class("dim")
         self.append(note)
@@ -614,6 +643,11 @@ class VoltageCurveView(Gtk.Box):
             self.stock = [v - self.applied for v in data]
         self.scale.set_value(self.applied)
         self.offset = self.applied
+        if self.mem_spin is not None:
+            mbps = self.gpu.read_mem_speed()
+            if mbps:
+                self.mem_applied = mbps
+                self.mem_spin.set_value(mbps / 1000.0)
         self._hint(); self.area.queue_draw(); self._mark()
         return False
 
@@ -628,7 +662,10 @@ class VoltageCurveView(Gtk.Box):
                               if self.offset else ""))
 
     def _mark(self):
-        self.apply_btn.set_visible(int(self.offset) != int(self.applied))
+        changed = int(self.offset) != int(self.applied)
+        if self.mem_spin is not None:
+            changed = changed or int(self.mem_spin.get_value() * 1000) != int(self.mem_applied)
+        self.apply_btn.set_visible(changed)
 
     def _on_slide(self, *_):
         self.offset = self.scale.get_value()
@@ -636,22 +673,38 @@ class VoltageCurveView(Gtk.Box):
 
     def _apply(self, *_):
         want = int(self.offset)
-        if want == int(self.applied):
+        off_changed = want != int(self.applied)
+        want_mbps = int(self.mem_spin.get_value() * 1000) if self.mem_spin is not None else None
+        mem_changed = want_mbps is not None and want_mbps != int(self.mem_applied)
+        if not off_changed and not mem_changed:
             return
 
-        def ok():
-            self.applied = want
-            self._hint(); self._mark()
-        # 'offset' is absolute-from-stock and persisted -> re-applied at boot
-        run_priv(["xe-gpu-oc", "offset", str(want)], self.window, ok)
-        self.window.toast(f"Applying voltage offset {'+' if want > 0 else ''}{want} mV (saved)…")
+        def apply_mem():
+            run_priv(["xe-gpu-oc", "mem", str(want_mbps)], self.window,
+                     lambda: (setattr(self, "mem_applied", want_mbps), self._mark()))
+
+        if off_changed and mem_changed:      # offset first, then memory (chained)
+            run_priv(["xe-gpu-oc", "offset", str(want)], self.window,
+                     lambda: (setattr(self, "applied", want), self._hint(), apply_mem()))
+        elif off_changed:
+            run_priv(["xe-gpu-oc", "offset", str(want)], self.window,
+                     lambda: (setattr(self, "applied", want), self._hint(), self._mark()))
+        elif mem_changed:
+            apply_mem()
+
+        parts = []
+        if off_changed:
+            parts.append(f"voltage {'+' if want > 0 else ''}{want} mV")
+        if mem_changed:
+            parts.append(f"memory {want_mbps / 1000:.2f} Gbps")
+        self.window.toast("Applying " + ", ".join(parts) + " (saved)…")
 
     def _reset(self, *_):
         def ok():
             self.applied = 0
-            self._load()
+            self._load()          # re-reads curve, persisted offset, and memory speed
         run_priv(["xe-gpu-oc", "reset"], self.window, ok)
-        self.window.toast("Restoring the stock voltage curve…")
+        self.window.toast("Restoring stock voltage curve + memory speed…")
 
     # ---- drawing ----
     def _draw(self, area, cr, w, h, *_):

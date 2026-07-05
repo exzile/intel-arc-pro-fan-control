@@ -28,6 +28,7 @@ Related upstream issue: [intel/compute-runtime #885](https://github.com/intel/co
 | GPU power cap (TDP) | ✅ sysfs | ✅ + persistent helper |
 | GPU clock min/max limits | ✅ sysfs | ✅ + persistent helper |
 | **Voltage-frequency curve (undervolt/overclock)** | ❌ | ✅ `xe_gt_oc` patch + `xe-gpu oc` |
+| **VRAM (GDDR6) memory-speed overclock** | ❌ | ✅ `xe_gt_oc` patch (`oc/mem_speed`) + `xe-gpu oc mem` |
 | Idle power/heat optimization | ❌ (idles at 1200 MHz) | ✅ (idles at 400 MHz) |
 | All-sensor temp/health monitor | raw sysfs | ✅ `xe-gpu-temps` (table/watch/json) |
 | Single-command status dashboard | — | ✅ `xe-gpu` (fan+clocks+power+temps) |

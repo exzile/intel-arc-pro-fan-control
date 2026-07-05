@@ -21,6 +21,12 @@
  *   read  -> one "<index> <voltage_mV>" line per point
  *   write -> one or more "<index> <voltage_mV>" lines; unlisted points keep
  *            their current value. Voltage is clamped to [OC_VMIN_MV, OC_VMAX_MV].
+ *
+ * sysfs: <device>/tile#/gt#/oc/mem_speed  (read/write)
+ *   GDDR6 memory data rate in Mbps (e.g. 19000 = 19 Gbps). Set via PCODE
+ *   LATE_BINDING domain 0x17: write (0x5e,6,0x17) d0=Mbps then commit
+ *   (0x5e,8,0x17); read (0x5e,5,0x17). Clamped to [OC_MEM_MIN_MBPS,
+ *   OC_MEM_MAX_MBPS]. Reads report the stock speed until a value is staged.
  */
 
 #include <linux/cleanup.h>
@@ -48,6 +54,16 @@
 #define OC_MBOX_WRITE	PCODE_MBOX(0x5d, 0xa, OC_VF_TABLE)
 #define OC_MBOX_END	PCODE_MBOX(0x5d, 0xb, OC_VF_TABLE)
 #define OC_MBOX_BEGIN	PCODE_MBOX(0x5f, 0x2, 0x0)
+
+/* VRAM (GDDR6) memory speed, in Mbps, via LATE_BINDING domain 0x17:
+ * read = (0x5e, 5, 0x17), set = (0x5e, 6, 0x17) d0=Mbps, commit = (0x5e, 8, 0x17). */
+#define OC_MEM_DOMAIN		0x17
+#define OC_MBOX_MEM_READ	PCODE_MBOX(0x5e, 0x5, OC_MEM_DOMAIN)
+#define OC_MBOX_MEM_SET		PCODE_MBOX(0x5e, 0x6, OC_MEM_DOMAIN)
+#define OC_MBOX_MEM_COMMIT	PCODE_MBOX(0x5e, 0x8, OC_MEM_DOMAIN)
+#define OC_MEM_MIN_MBPS		14000
+#define OC_MEM_MAX_MBPS		24000
+#define OC_MEM_STOCK_MBPS	19000	/* B60/B70 GDDR6 default (2375 MHz x8); reported before anything is staged */
 
 static struct xe_device *oc_kobj_to_xe(struct kobject *kobj)
 {
@@ -136,10 +152,55 @@ static ssize_t vf_curve_store(struct kobject *kobj, struct kobj_attribute *attr,
 	return count;
 }
 
+static ssize_t mem_speed_show(struct kobject *kobj, struct kobj_attribute *attr,
+			      char *buf)
+{
+	struct xe_device *xe = oc_kobj_to_xe(kobj);
+	struct xe_tile *tile = xe_device_get_root_tile(xe);
+	u32 mbps = 0, hi = 0;
+	int ret;
+
+	guard(xe_pm_runtime)(xe);
+
+	/* p1=5 read returns -EPROTO until a value has been staged (fresh boot =
+	 * hardware default); report the stock speed in that case. */
+	ret = xe_pcode_read(tile, OC_MBOX_MEM_READ, &mbps, &hi);
+	if (ret)
+		mbps = OC_MEM_STOCK_MBPS;
+
+	return sysfs_emit(buf, "%u\n", mbps);
+}
+
+static ssize_t mem_speed_store(struct kobject *kobj, struct kobj_attribute *attr,
+			       const char *buf, size_t count)
+{
+	struct xe_device *xe = oc_kobj_to_xe(kobj);
+	struct xe_tile *tile = xe_device_get_root_tile(xe);
+	u32 mbps, c0 = 0, c1 = 0;
+	int ret;
+
+	ret = kstrtou32(buf, 0, &mbps);
+	if (ret)
+		return ret;
+	if (mbps < OC_MEM_MIN_MBPS || mbps > OC_MEM_MAX_MBPS)
+		return -EINVAL;
+
+	guard(xe_pm_runtime)(xe);
+
+	ret = xe_pcode_write64_timeout(tile, OC_MBOX_MEM_SET, mbps, 0, 1);
+	if (ret)
+		return ret;
+	xe_pcode_read(tile, OC_MBOX_MEM_COMMIT, &c0, &c1);   /* commit / finalize */
+
+	return count;
+}
+
 static struct kobj_attribute attr_vf_curve = __ATTR_RW(vf_curve);
+static struct kobj_attribute attr_mem_speed = __ATTR_RW(mem_speed);
 
 static const struct attribute *oc_attrs[] = {
 	&attr_vf_curve.attr,
+	&attr_mem_speed.attr,
 	NULL,
 };
 

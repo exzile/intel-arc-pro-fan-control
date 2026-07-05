@@ -48,12 +48,29 @@ with the fan-control build (`apply_xefan.sh`) — run both for fan + OC.
 ## Use
 
 ```bash
-sudo xe-gpu oc read              # dump the curve (index -> voltage mV)
+sudo xe-gpu oc read              # dump the curve (index -> voltage mV) + memory speed
 sudo xe-gpu oc offset -25        # undervolt every point by 25 mV
 sudo xe-gpu oc offset 30         # overvolt (headroom for higher clocks)
 sudo xe-gpu oc set 60 980        # set one point (index 60) to 980 mV
-sudo xe-gpu oc reset             # restore the saved stock curve
+sudo xe-gpu oc mem 20000         # set VRAM (GDDR6) memory speed to 20 Gbps (Mbps)
+sudo xe-gpu oc reset             # restore the stock curve + memory speed
 ```
+
+### VRAM memory speed
+
+The GDDR6 memory data rate is a separate knob (`.../gt0/oc/mem_speed`, in Mbps —
+`19000` = 19 Gbps stock). It uses PCODE LATE_BINDING domain `0x17` (write
+`0x5e/6/0x17` + commit `0x5e/8/0x17`), captured from the vendor driver the same way
+as the VF curve. Raise it for more VRAM bandwidth:
+
+```bash
+sudo xe-gpu oc mem 20000         # 20 Gbps  (clamped 14000..24000 Mbps)
+```
+
+Memory OC can cause artifacts/instability if pushed too far — increase in small
+steps and test. It persists and re-applies at boot like the voltage curve. (Note:
+`xe` exposes no VRAM-clock telemetry, so verify a real gain with a memory-bandwidth
+benchmark.)
 
 The first change saves the stock curve to `/var/lib/xe-gpu-oc/stock-curve`, so
 `reset` always brings you back. `offset` is **absolute from stock** (not cumulative),

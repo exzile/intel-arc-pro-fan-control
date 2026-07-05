@@ -38,8 +38,9 @@ solid.
 
 - **Voltage offset** slider — drag left to **undervolt** (−mV: cooler, more efficient) or right to
   **overvolt** (+mV: headroom for higher clocks). The graph previews the shifted curve live.
-- **Apply** writes the offset (`xe-gpu-oc offset …`); **Reset** restores the stock curve; **Reload**
-  re-reads it from the GPU.
+- **Memory speed** — sets the GDDR6 data rate in Gbps (a separate VRAM overclock).
+- **Apply** writes whatever changed (`xe-gpu-oc offset …` / `mem …`); **Reset** restores the stock
+  curve + memory speed; **Reload** re-reads from the GPU.
 - Voltage is clamped to a safe 400–1200 mV. Combine with the Dashboard's power/clock controls for a
   full overclock.
 
