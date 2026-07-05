@@ -33,7 +33,10 @@ A graphical editor for the 10-point hardware fan table:
 ## Overclock tab
 
 Appears only when the `xe_gt_oc` patch is loaded (it exposes `.../gt0/oc/vf_curve` — see
-[OVERCLOCKING.md](OVERCLOCKING.md)). It shows the GPU's **voltage-frequency curve** as a graph
+[OVERCLOCKING.md](OVERCLOCKING.md)). Controls are grouped into **section panels** — *Voltage curve*
+(left), *Power & clocks*, *Memory*, and *Thermal* (right) — each with a header **ⓘ** describing the
+group, and every row has its own hoverable **ⓘ** icon with a full description. It shows the GPU's
+**voltage-frequency curve** as a graph
 (X = frequency step, idle → max; Y = voltage in mV): stock is dashed, your preview is the solid
 accent line with a shaded fill, and the red dashed line marks your voltage limit.
 

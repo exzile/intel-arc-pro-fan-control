@@ -612,23 +612,26 @@ def volt_color(delta):
 
 
 class SliderField:
-    """One aligned form row: [icon] [label] [====slider====] [spin] [unit].
-    The slider and spin share a single Adjustment, so they stay in sync for free."""
+    """One aligned form row: [icon] [label ⓘ] [====slider====] [spin] [unit].
+    The slider and spin share a single Adjustment, so they stay in sync for free.
+    A hoverable info (ⓘ) icon carries the full description."""
     def __init__(self, grid, row, icon, label, lo, hi, step, value, unit,
                  digits=0, tip=None, on_change=None):
         self.adj = Gtk.Adjustment(lower=lo, upper=hi, step_increment=step,
                                   page_increment=step * 5, value=value)
         img = Gtk.Image(icon_name=icon); img.add_css_class("field-icon")
         self.label = Gtk.Label(label=label, xalign=0); self.label.add_css_class("field-label")
+        labelbox = Gtk.Box(spacing=5); labelbox.append(self.label)
         if tip:
-            self.label.set_tooltip_text(tip); img.set_tooltip_text(tip)
+            img.set_tooltip_text(tip)
+            labelbox.append(info_icon(tip))   # explicit ⓘ icon with the description
         self.scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL,
                                adjustment=self.adj, hexpand=True, draw_value=False)
         self.scale.add_css_class("oc-scale")
         self.spin = Gtk.SpinButton(adjustment=self.adj, digits=digits, valign=Gtk.Align.CENTER)
         self.spin.set_numeric(True); self.spin.add_css_class("field-spin")
         unit_l = Gtk.Label(label=unit, xalign=0); unit_l.add_css_class("field-unit")
-        for col, wdg in enumerate((img, self.label, self.scale, self.spin, unit_l)):
+        for col, wdg in enumerate((img, labelbox, self.scale, self.spin, unit_l)):
             grid.attach(wdg, col, row, 1, 1)
         if on_change:
             self.adj.connect("value-changed", lambda *_: on_change())
@@ -669,32 +672,43 @@ class VoltageCurveView(Gtk.Box):
         self._drag = None
         self._loading = True
 
-        # --- graph ---
+        # ===== two-column body: voltage (left) · power / memory / thermal (right) =====
+        body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        left.set_size_request(540, -1)
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True)
+        body.append(left); body.append(right)
+        self.append(body)
+
+        # --- Section: Voltage curve (graph + mode toggle + offset/limit) ---
+        vsec = card("Voltage curve",
+                    "The GPU voltage-frequency curve — each frequency step's voltage (mV). "
+                    "Undervolt for efficiency, overvolt for clock headroom. "
+                    "X = idle → max, Y = voltage; dashed = stock, solid = your preview.")
         self.area = Gtk.DrawingArea(hexpand=True, vexpand=True)
-        self.area.set_size_request(560, 270)
+        self.area.set_size_request(500, 220)
         self.area.set_draw_func(self._draw)
         frame = Gtk.Frame(); frame.add_css_class("card2"); frame.set_child(self.area)
-        self.append(frame)
+        vsec.append(frame)
         drag = Gtk.GestureDrag()
         drag.connect("drag-begin", self._on_begin)
         drag.connect("drag-update", self._on_update)
         drag.connect("drag-end", lambda *_: setattr(self, "_drag", None))
         self.area.add_controller(drag)
 
-        # --- mode toggle ---
-        moderow = Gtk.Box(spacing=10); moderow.add_css_class("mode-row")
+        moderow = Gtk.Box(spacing=8); moderow.add_css_class("mode-row")
         micon = Gtk.Image(icon_name="power-profile-balanced-symbolic"); micon.add_css_class("field-icon")
         moderow.append(micon)
-        mlbl = Gtk.Label(label="Adjustment mode", xalign=0); mlbl.add_css_class("field-label")
-        moderow.append(mlbl)
-        self.chk_curve = Gtk.CheckButton(label="Per-point curve (drag the nodes)")
+        self.chk_curve = Gtk.CheckButton(label="Per-point curve")
         self.chk_curve.set_tooltip_text(
             "Off: shift the whole curve by one uniform voltage offset.\n"
             "On: shape the curve — drag the anchor nodes to set the voltage at each "
             "frequency region independently (a full custom VF curve).")
         self.chk_curve.connect("toggled", self._on_mode)
         moderow.append(self.chk_curve)
-        spacer = Gtk.Box(hexpand=True); moderow.append(spacer)
+        moderow.append(info_icon("Off: one uniform voltage offset shifts the whole curve.\n"
+                                 "On: drag the round nodes to shape voltage per frequency region."))
+        moderow.append(Gtk.Box(hexpand=True))
         picon = Gtk.Image(icon_name="starred-symbolic"); picon.add_css_class("field-icon")
         moderow.append(picon)
         self.preset = Gtk.DropDown.new_from_strings(["Preset…"] + list(OC_PRESETS))
@@ -702,88 +716,105 @@ class VoltageCurveView(Gtk.Box):
                                      "(offset mode). Nothing is written until you press Apply.")
         self.preset.connect("notify::selected", self._on_preset)
         moderow.append(self.preset)
-        self.append(moderow)
+        vsec.append(moderow)
 
-        # --- aligned form grid ---
-        grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        vgrid = Gtk.Grid(column_spacing=12, row_spacing=10)
         self.f_off = SliderField(
-            grid, 0, "power-profile-power-saver-symbolic", "Voltage offset",
+            vgrid, 0, "power-profile-power-saver-symbolic", "Voltage offset",
             -150, 150, 5, 0, "mV",
             tip="Shift every point of the VF curve. −mV undervolts (cooler, more efficient); "
                 "+mV overvolts (headroom for higher clocks).",
             on_change=self._on_off)
         self.f_vlim = SliderField(
-            grid, 1, "security-high-symbolic", "Voltage limit",
+            vgrid, 1, "security-high-symbolic", "Voltage limit",
             800, VMAX_MV, 10, VMAX_MV, "mV",
             tip="Ceiling for the curve's peak voltage — the applied curve is clamped here. "
                 "A safety cap on how high voltage may go.",
             on_change=self._on_knob)
-        r = 2
+        vsec.append(vgrid)
+        left.append(vsec)
+
+        # --- Section: Power & clocks ---
+        psec = card("Power & clocks",
+                    "Board power cap (TDP) plus the GPU clock floor/ceiling and the driver power "
+                    "profile. Raise power to sustain higher clocks; lower for cooler/quieter.")
+        pgrid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        pr = 0
         self.f_pow = None
         cap0 = self.gpu.power().get("cap_w")
         if cap0:
             self.pow_applied = int(cap0)
             self.f_pow = SliderField(
-                grid, r, "power-profile-performance-symbolic", "Power limit",
+                pgrid, pr, "power-profile-performance-symbolic", "Power limit",
                 50, 400, 5, cap0, "W",
                 tip="Board power cap (TDP). Higher sustains boost clocks longer; lower runs "
                     "cooler/quieter.", on_change=self._on_knob)
-            r += 1
-        self.f_mem = None
-        if self.gpu.mem_available:
-            self.mem_applied = 19000
-            self.f_mem = SliderField(
-                grid, r, "drive-harddisk-symbolic", "Memory speed",
-                14.0, 24.0, 0.1, 19.0, "Gbps", digits=2,
-                tip="GDDR6 data rate. Higher = more VRAM bandwidth; raise cautiously.",
-                on_change=self._on_knob)
-            r += 1
-        self.f_temp = None
-        if self.gpu.temp_available:
-            self.temp_applied = 100
-            self.f_temp = SliderField(
-                grid, r, "dialog-warning-symbolic", "Temp limit",
-                60, 100, 1, 100, "°C",
-                tip="Thermal-throttle target. Higher = more sustained clock before throttling; "
-                    "lower = cooler/quieter.", on_change=self._on_knob)
-            r += 1
-        # clocks + power profile — consolidated here from the Dashboard (all perf knobs in one place)
+            pr += 1
         cl = self.gpu.clocks()
         clo = cl.get("rpn") or 400
         chi = cl.get("rp0") or 2400
         self.cmin_applied = int(cl.get("min") or clo)
         self.cmax_applied = int(cl.get("max") or chi)
         self.f_cmin = SliderField(
-            grid, r, "go-first-symbolic", "Min clock", clo, chi, 50, self.cmin_applied, "MHz",
+            pgrid, pr, "go-first-symbolic", "Min clock", clo, chi, 50, self.cmin_applied, "MHz",
             tip="Idle clock floor. Lower (e.g. 400) drops idle power/heat; still boosts under load.",
             on_change=self._on_knob)
-        r += 1
+        pr += 1
         self.f_cmax = SliderField(
-            grid, r, "go-last-symbolic", "Max clock", clo, chi, 50, self.cmax_applied, "MHz",
+            pgrid, pr, "go-last-symbolic", "Max clock", clo, chi, 50, self.cmax_applied, "MHz",
             tip="Clock ceiling under load. Lower for less heat/noise; raise to the hardware max for "
                 "peak performance.", on_change=self._on_knob)
-        r += 1
+        pr += 1
         self.profile_dd = None
         self.prof_applied = None
         prof = self.gpu.power_profile()
         if prof and prof.get("options"):
-            picon = Gtk.Image(icon_name="power-profile-balanced-symbolic")
-            picon.add_css_class("field-icon")
-            plbl = Gtk.Label(label="Power profile", xalign=0); plbl.add_css_class("field-label")
-            plbl.set_tooltip_text("Driver power profile: 'power_saving' trims idle draw; "
-                                  "'base' is the default.")
+            gi = Gtk.Image(icon_name="power-profile-balanced-symbolic"); gi.add_css_class("field-icon")
+            gl = Gtk.Label(label="Power profile", xalign=0); gl.add_css_class("field-label")
+            glbox = Gtk.Box(spacing=5); glbox.append(gl)
+            glbox.append(info_icon("Driver power profile: 'power_saving' trims idle draw; "
+                                   "'base' is the default balanced profile."))
             self.profile_dd = Gtk.DropDown.new_from_strings(prof["options"])
             if prof.get("current") in prof["options"]:
                 self.profile_dd.set_selected(prof["options"].index(prof["current"]))
                 self.prof_applied = prof["current"]
             self.profile_dd.set_halign(Gtk.Align.START)
             self.profile_dd.connect("notify::selected", lambda *_: self._on_knob())
-            grid.attach(picon, 0, r, 1, 1); grid.attach(plbl, 1, r, 1, 1)
-            grid.attach(self.profile_dd, 2, r, 1, 1)
-            r += 1
-        self.append(grid)
+            pgrid.attach(gi, 0, pr, 1, 1); pgrid.attach(glbox, 1, pr, 1, 1)
+            pgrid.attach(self.profile_dd, 2, pr, 1, 1)
+        psec.append(pgrid); right.append(psec)
 
-        # --- action bar ---
+        # --- Section: Memory ---
+        self.f_mem = None
+        if self.gpu.mem_available:
+            msec = card("Memory",
+                        "GDDR6 video-memory data rate. More bandwidth helps memory-bound "
+                        "workloads; raise in small steps and run the stability test.")
+            mgrid = Gtk.Grid(column_spacing=12, row_spacing=10)
+            self.mem_applied = 19000
+            self.f_mem = SliderField(
+                mgrid, 0, "drive-harddisk-symbolic", "Memory speed",
+                14.0, 24.0, 0.1, 19.0, "Gbps", digits=2,
+                tip="GDDR6 data rate. Higher = more VRAM bandwidth; raise cautiously.",
+                on_change=self._on_knob)
+            msec.append(mgrid); right.append(msec)
+
+        # --- Section: Thermal ---
+        self.f_temp = None
+        if self.gpu.temp_available:
+            tsec = card("Thermal",
+                        "GPU thermal-throttle target. Raise it to hold boost clocks longer under "
+                        "load; lower it to run cooler and quieter.")
+            tgrid = Gtk.Grid(column_spacing=12, row_spacing=10)
+            self.temp_applied = 100
+            self.f_temp = SliderField(
+                tgrid, 0, "dialog-warning-symbolic", "Temp limit",
+                60, 100, 1, 100, "°C",
+                tip="Thermal-throttle target. Higher = more sustained clock before throttling; "
+                    "lower = cooler/quieter.", on_change=self._on_knob)
+            tsec.append(tgrid); right.append(tsec)
+
+        # --- action bar (full width) ---
         bar = Gtk.Box(spacing=8)
         self.hint = Gtk.Label(xalign=0, hexpand=True); self.hint.add_css_class("dim")
         bar.append(self.hint)
@@ -1291,8 +1322,11 @@ class Window(Adw.ApplicationWindow):
         # Overclock tab — only if the xe_gt_oc patch exposes the VF curve
         if self.gpu.oc_available:
             self.oc_view = VoltageCurveView(self.gpu, self)
-            oc_wrap = Gtk.Box(margin_start=12, margin_end=12, margin_top=12, margin_bottom=12)
-            oc_wrap.append(self.oc_view)
+            self.oc_view.set_margin_start(12); self.oc_view.set_margin_end(12)
+            self.oc_view.set_margin_top(12); self.oc_view.set_margin_bottom(12)
+            oc_wrap = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+            oc_wrap.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            oc_wrap.set_child(self.oc_view)
             p3 = self.stack.add_titled(oc_wrap, "oc", "Overclock")
             p3.set_icon_name("power-profile-performance-symbolic")
 
