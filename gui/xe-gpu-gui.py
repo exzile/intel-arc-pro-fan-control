@@ -648,13 +648,21 @@ class Window(Adw.ApplicationWindow):
         return s
 
     def on_apply(self, _b):
-        run_priv(["xe-gpu-tune", "set", "--power-w", str(int(self.sp_pow.get_value())),
-                  "--clk-min", str(int(self.sp_min.get_value())),
-                  "--clk-max", str(int(self.sp_max.get_value()))], self, self.refresh)
-        self.tune_base = self._tune_vals()
+        cur = self._tune_vals()
+        args = ["xe-gpu-tune", "set"]
+        if cur[0] != self.tune_base[0]:
+            args += ["--power-w", str(int(cur[0]))]
+        if cur[1] != self.tune_base[1]:
+            args += ["--clk-min", str(int(cur[1]))]
+        if cur[2] != self.tune_base[2]:
+            args += ["--clk-max", str(int(cur[2]))]
+        if len(args) == 2:      # nothing actually changed
+            return
+        run_priv(args, self, self.refresh)
+        self.tune_base = cur
         self._mark_tune()
-        self.toast(f"Applying: {int(self.sp_pow.get_value())} W · "
-                   f"{int(self.sp_min.get_value())}–{int(self.sp_max.get_value())} MHz")
+        self.toast("Applying " + " ".join(args[2:]).replace("--power-w", "power")
+                   .replace("--clk-min", "min").replace("--clk-max", "max"))
 
     def _tc(self, w, cls):
         for x in ("t-cool", "t-warm", "t-hot"):

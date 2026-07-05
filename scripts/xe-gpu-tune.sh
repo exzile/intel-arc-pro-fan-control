@@ -43,7 +43,8 @@ case "${1:-show}" in
   reset)
     echo "$(rd $GT/rp0_freq)" > "$GT/max_freq"
     echo "$(rd $GT/rpn_freq)" > "$GT/min_freq"   # note: hw default min; some firmwares idle-floor higher
-    [ -n "$HW" ] && [ -e "$HW/power1_cap" ] && { def=$(rd "$HW/power1_rated_max" 2>/dev/null); [ -n "$def" ] && echo "$def" > "$HW/power1_cap"; }
+    # power: restore the rated default if the card exposes one, else 0 = uncapped (the shipped default)
+    [ -n "$HW" ] && [ -e "$HW/power1_cap" ] && { def=$(rd "$HW/power1_rated_max" 2>/dev/null); echo "${def:-0}" > "$HW/power1_cap"; }
     echo "reset to hardware defaults:"; show ;;
   set)
     shift
