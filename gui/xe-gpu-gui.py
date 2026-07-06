@@ -245,6 +245,17 @@ class XeGpu:
                 return v // 1000 if v is not None else None
         return None
 
+    def probe(self):
+        # CHEAP registry probe for building the dashboard: sensor labels only (no live
+        # *_input reads) + the static max clock + VRAM total. Avoids the slow first-wake
+        # + per-channel temp reads that a full snapshot() does, so construction/GPU-switch
+        # never blocks the UI thread. The real values arrive via the async _tick snapshot.
+        rp0 = _int(os.path.join(self.card or "", "device/tile0/gt0/freq0/rp0_freq")) or 2900
+        mains, vram = [], []
+        for lbl, _f, _crit in self.tmap():
+            (vram if lbl.startswith("vram_ch_") else mains).append({"label": lbl})
+        return {"clocks": {"rp0": rp0}, "mains": mains, "vram": vram, "vmem": self.vram()}
+
     def snapshot(self):
         # one full read of everything — call this OFF the main thread
         return {"id": self.identity(), "clocks": self.clocks(), "power": self.power(),
@@ -1704,6 +1715,10 @@ class VoltageCurveView(Gtk.Box):
                "--display", env.get("DISPLAY", ""),
                "--wayland", env.get("WAYLAND_DISPLAY", ""),
                "--runtime", env.get("XDG_RUNTIME_DIR", "")]
+        # multi-GPU: pin the GL workload to the SELECTED card (else it loads the primary)
+        bdf = getattr(self.window.gpu, "bdf", None)
+        if getattr(self.window, "_multi_gpu", False) and bdf:
+            cmd += ["--dri", "pci-" + bdf.replace(":", "_").replace(".", "_")]
 
         def work():
             summary = {}
@@ -1950,7 +1965,7 @@ class Window(Adw.ApplicationWindow):
         GLib.timeout_add(ms, lambda: (t.dismiss(), False)[1])
 
     def _build_dashboard(self):
-        sample = self.gpu.snapshot()
+        sample = self.gpu.probe()          # cheap: labels + rp0 + vram total, no UI-thread stall
         self.metrics = build_metrics(sample) + build_temp_metrics(sample)
         self.metric_by_id = {m.id: m for m in self.metrics}
         saved = load_config().get("metrics", {})

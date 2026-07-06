@@ -21,13 +21,15 @@ done
 [ -n "$CARD" ] || { echo "error: no xe GPU found"; exit 1; }
 GT="$CARD/device/tile0/gt0/freq0"
 [ -d "$GT" ] || { echo "error: no freq controls at $GT"; exit 1; }
-# matching hwmon (same BDF as CARD)
+# matching hwmon (same BDF as CARD; fall back to the first xe hwmon if none matches)
 CBDF=$(basename "$(readlink -f "$CARD/device")")
-HW=""
+HW=""; HW_ANY=""
 for d in /sys/class/hwmon/hwmon*; do
   [ -r "$d/name" ] && [ "$(cat "$d/name")" = "xe" ] || continue
-  [ "$(basename "$(readlink -f "$d/device" 2>/dev/null)" 2>/dev/null)" = "$CBDF" ] && { HW="$d"; break; }
+  [ -z "$HW_ANY" ] && HW_ANY="$d"
+  if [ "$(basename "$(readlink -f "$d/device" 2>/dev/null)" 2>/dev/null)" = "$CBDF" ]; then HW="$d"; break; fi
 done
+[ -n "$HW" ] || HW="$HW_ANY"
 
 rd() { cat "$1" 2>/dev/null; }
 show() {

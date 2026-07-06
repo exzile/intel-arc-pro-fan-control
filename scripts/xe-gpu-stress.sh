@@ -18,7 +18,7 @@ set -uo pipefail
 SECS="${1:-60}"
 [[ "$SECS" =~ ^[0-9]+$ ]] || { echo "usage: xe-gpu-stress <seconds> [--fan-guard ...]"; exit 64; }
 shift || true
-RUNUSER=""; DISP=""; WLD=""; XRD=""; FANGUARD=0
+RUNUSER=""; DISP=""; WLD=""; XRD=""; FANGUARD=0; DRIPRIME=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --fan-guard) FANGUARD=1; shift ;;
@@ -26,6 +26,7 @@ while [ "$#" -gt 0 ]; do
     --display)   DISP="${2:-}"; shift 2 ;;
     --wayland)   WLD="${2:-}"; shift 2 ;;
     --runtime)   XRD="${2:-}"; shift 2 ;;
+    --dri)       DRIPRIME="${2:-}"; shift 2 ;;   # DRI_PRIME to pin the load to a card
     *) shift ;;
   esac
 done
@@ -101,11 +102,12 @@ fan_max_on
 # uncapped (vblank_mode=0) so it actually loads the GPU rather than idling at 60 fps.
 # Under --fan-guard we run as root, so drop to the target user (with their session
 # env) to open the display; otherwise run the workload directly.
+DRIENV=""; [ -n "$DRIPRIME" ] && DRIENV="DRI_PRIME=$DRIPRIME"
 if [ "$FANGUARD" = 1 ] && [ "$(id -u)" -eq 0 ] && [ -n "$RUNUSER" ]; then
   setsid runuser -u "$RUNUSER" -- env DISPLAY="$DISP" WAYLAND_DISPLAY="$WLD" \
-    XDG_RUNTIME_DIR="$XRD" vblank_mode=0 __GL_SYNC_TO_VBLANK=0 $WL >/dev/null 2>&1 &
+    XDG_RUNTIME_DIR="$XRD" $DRIENV vblank_mode=0 __GL_SYNC_TO_VBLANK=0 $WL >/dev/null 2>&1 &
 else
-  setsid env vblank_mode=0 __GL_SYNC_TO_VBLANK=0 $WL >/dev/null 2>&1 &
+  setsid env $DRIENV vblank_mode=0 __GL_SYNC_TO_VBLANK=0 $WL >/dev/null 2>&1 &
 fi
 PID=$!
 sleep 1
