@@ -421,6 +421,44 @@ bool ArcController::readTemperatures(std::vector<TempSensor>& out, std::string& 
     return true;
 }
 
+bool ArcController::readMemory(MemoryInfo& out, std::string& err) {
+    ctl_device_adapter_handle_t h = handle();
+    if (!h) { err = "no adapter selected"; return false; }
+    ARC_REQUIRE_FN(ctlEnumMemoryModules);
+    ARC_REQUIRE_FN(ctlMemoryGetState);
+
+    uint32_t count = 0;
+    ctl_result_t r = lib_.ctlEnumMemoryModules(h, &count, nullptr);
+    if (r != CTL_RESULT_SUCCESS || count == 0) { err = "no memory modules (" + ctlErr(r) + ")."; return false; }
+    std::vector<ctl_mem_handle_t> handles(count, nullptr);
+    r = lib_.ctlEnumMemoryModules(h, &count, handles.data());
+    if (r != CTL_RESULT_SUCCESS) { err = "ctlEnumMemoryModules failed (" + ctlErr(r) + ")."; return false; }
+
+    out = MemoryInfo{};
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!handles[i]) continue;
+        // Properties are optional detail; state carries the total/free we need.
+        if (lib_.ctlMemoryGetProperties) {
+            ctl_mem_properties_t props;
+            zeroInit(props);
+            if (lib_.ctlMemoryGetProperties(handles[i], &props) == CTL_RESULT_SUCCESS) {
+                if (props.busWidth > 0) out.busWidth = props.busWidth;
+                if (props.numChannels > 0) out.numChannels = props.numChannels;
+            }
+        }
+        ctl_mem_state_t st;
+        zeroInit(st);
+        if (lib_.ctlMemoryGetState(handles[i], &st) == CTL_RESULT_SUCCESS) {
+            out.totalBytes += st.size;
+            out.freeBytes += st.free;
+            out.valid = true;
+        }
+    }
+    if (!out.valid) { err = "memory state unavailable"; return false; }
+    out.usedBytes = (out.totalBytes >= out.freeBytes) ? out.totalBytes - out.freeBytes : 0;
+    return true;
+}
+
 bool ArcController::ocGetState(OcState& out, std::string& err) {
     ctl_device_adapter_handle_t h = handle();
     if (!h) { err = "no adapter selected"; return false; }

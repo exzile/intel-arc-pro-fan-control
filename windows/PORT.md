@@ -41,7 +41,7 @@ The alternatives considered and why IGCL won:
 | Per-sensor temp table | `xe-gpu-temps` (12 VRAM channels) | `ctlEnumTemperatureSensors` → `arc-gpu temps` | ✅ (IGCL exposes GPU/VRAM/global, not 12 VRAM channels) |
 | Named OC profiles | `xe-gpu-oc profile save/load` | `arc-gpu oc profile save/load/list/delete` | ✅ |
 | Stability test | `xe-gpu-stress` | — | ⬜ not yet |
-| VRAM used/total | root debugfs → `xe-gpu-vramd` | IGCL memory props | ⬜ not yet |
+| VRAM used/total | root debugfs → `xe-gpu-vramd` | `ctlMemoryGetState` → `arc-gpu status` | ✅ (no root needed) |
 
 ## Notable differences from Linux
 
@@ -59,7 +59,8 @@ The alternatives considered and why IGCL won:
 
 1. ~~Per-sensor temperature table~~ — **done** (`arc-gpu temps`).
 2. ~~Named OC profiles~~ — **done** (`arc-gpu oc profile save/load/list/delete`).
-3. **VRAM used/total + memory props** — surface from IGCL for the dashboard.
+3. ~~VRAM used/total + memory props~~ — **done** (`arc-gpu status`, via
+   `ctlMemoryGetState`; no root needed unlike the Linux debugfs path).
 4. **Native GUI** — a WinUI 3 / Win32 dashboard + fan-curve + OC editor over
    `arc_core` (the CLI and service already share that library).
 5. **Stability test** — a fan-guarded GPU load with auto-revert, porting

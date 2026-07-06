@@ -69,6 +69,16 @@ struct TempSensor {
     double maxC = 0;       // hardware max for this sensor (0 if unknown)
 };
 
+// Aggregated VRAM state across all device-local memory modules.
+struct MemoryInfo {
+    uint64_t totalBytes = 0;   // allocatable total
+    uint64_t freeBytes = 0;
+    uint64_t usedBytes = 0;
+    int busWidth = -1;
+    int numChannels = -1;
+    bool valid = false;
+};
+
 // A raw telemetry snapshot. Rate metrics (power, utilization, bandwidth) are
 // counters here; call deriveMetrics() on two snapshots to get instantaneous
 // values, exactly as the Linux tools do with energy*_input.
@@ -168,6 +178,10 @@ public:
     // Per-sensor temperatures (GPU / VRAM / global + min variants). Requires the
     // ControlLib temperature exports; returns false if they're absent.
     bool readTemperatures(std::vector<TempSensor>& out, std::string& err);
+
+    // VRAM used/total, aggregated across device-local memory modules. On Linux
+    // this needed root-only debugfs; IGCL exposes it directly.
+    bool readMemory(MemoryInfo& out, std::string& err);
 
     // --- Overclock / tuning ------------------------------------------------
     bool ocGetState(OcState& out, std::string& err);

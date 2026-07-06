@@ -120,6 +120,14 @@ int cmdStatus(ArcController& a) {
     std::string fe;
     if (a.fanGetRpm(rpm, fe) && a.fanGetPercent(pct, fe))
         std::printf("Fan    : %d RPM (%d%%)\n", rpm, pct);
+
+    MemoryInfo mem;
+    if (a.readMemory(mem, fe) && mem.totalBytes > 0) {
+        const double gib = 1024.0 * 1024.0 * 1024.0;
+        std::printf("VRAM   : %.1f / %.1f GiB (%.0f%%)\n",
+                    mem.usedBytes / gib, mem.totalBytes / gib,
+                    100.0 * mem.usedBytes / mem.totalBytes);
+    }
     return 0;
 }
 

@@ -45,6 +45,9 @@ namespace arc {
     X(ctlEnumTemperatureSensors)                                                \
     X(ctlTemperatureGetProperties)                                              \
     X(ctlTemperatureGetState)                                                   \
+    X(ctlEnumMemoryModules)                                                     \
+    X(ctlMemoryGetProperties)                                                   \
+    X(ctlMemoryGetState)                                                        \
     X(ctlOverclockGetProperties)                                               \
     X(ctlOverclockWaiverSet)                                                    \
     X(ctlOverclockGpuFrequencyOffsetGetV2)                                      \
@@ -97,6 +100,9 @@ public:
     ctl_pfnEnumTemperatureSensors_t            ctlEnumTemperatureSensors = nullptr;
     ctl_pfnTemperatureGetProperties_t          ctlTemperatureGetProperties = nullptr;
     ctl_pfnTemperatureGetState_t               ctlTemperatureGetState = nullptr;
+    ctl_pfnEnumMemoryModules_t                 ctlEnumMemoryModules = nullptr;
+    ctl_pfnMemoryGetProperties_t               ctlMemoryGetProperties = nullptr;
+    ctl_pfnMemoryGetState_t                    ctlMemoryGetState = nullptr;
     ctl_pfnOverclockGetProperties_t            ctlOverclockGetProperties = nullptr;
     ctl_pfnOverclockWaiverSet_t                ctlOverclockWaiverSet = nullptr;
     ctl_pfnOverclockGpuFrequencyOffsetGetV2_t  ctlOverclockGpuFrequencyOffsetGetV2 = nullptr;
