@@ -88,6 +88,16 @@ try {
     Write-Warning "Could not create Start-Menu shortcut: $_"
 }
 
+# Auto-start the tray icon at login (all users) so it's always in the notification
+# area. --tray launches straight to the tray (window hidden until clicked).
+try {
+    $runKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
+    Set-ItemProperty -Path $runKey -Name 'ArcGpuControl' -Value "`"$InstallDir\arc-gpu-gui.exe`" --tray"
+    Write-Host 'Registered the tray icon to auto-start at login.'
+} catch {
+    Write-Warning "Could not register tray auto-start: $_"
+}
+
 # Disable Intel's fan/OC ownership so our service/tools can control the hardware.
 if (-not $KeepIntelService) {
     foreach ($svc in $IntelOwnerServices) {

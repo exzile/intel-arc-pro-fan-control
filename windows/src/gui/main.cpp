@@ -14,6 +14,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
+#include <shellapi.h>
 #include <cstdio>
 #include <cmath>
 #include <string>
@@ -26,10 +27,13 @@
 #include "../apply.hpp"
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "shell32.lib")
 
 using namespace arc;
 
 namespace {
+
+#define WM_TRAYICON (WM_APP + 1)
 
 enum : int {
     kIdCombo = 1001,
@@ -39,8 +43,52 @@ enum : int {
     kIdBtnMax = 1005,
     kIdBtnApplyCurve = 1006,
     kIdBtnResetCurve = 1007,
+    kIdTrayOpen = 1101,
+    kIdTrayFanAuto = 1102,
+    kIdTrayFanMax = 1103,
+    kIdTrayExit = 1104,
     kTimerId = 1,
+    kTrayIconId = 1,
 };
+
+// Live in the notification area; closing/minimising hides to tray, and the tray
+// icon (single-click = open, right-click = menu) brings the window back.
+NOTIFYICONDATAW g_nid{};
+bool g_reallyExit = false;
+
+void addTrayIcon(HWND hwnd) {
+    g_nid = {};
+    g_nid.cbSize = sizeof(g_nid);
+    g_nid.hWnd = hwnd;
+    g_nid.uID = kTrayIconId;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_TRAYICON;
+    g_nid.hIcon = ::LoadIconW(nullptr, IDI_APPLICATION);
+    wcscpy_s(g_nid.szTip, ARRAYSIZE(g_nid.szTip), L"Arc GPU Control");
+    ::Shell_NotifyIconW(NIM_ADD, &g_nid);
+}
+
+void removeTrayIcon() { ::Shell_NotifyIconW(NIM_DELETE, &g_nid); }
+
+void showMainWindow(HWND hwnd) {
+    ::ShowWindow(hwnd, SW_SHOW);
+    ::ShowWindow(hwnd, SW_RESTORE);
+    ::SetForegroundWindow(hwnd);
+}
+
+void showTrayMenu(HWND hwnd) {
+    HMENU m = ::CreatePopupMenu();
+    ::AppendMenuW(m, MF_STRING, kIdTrayOpen, L"Open Arc GPU Control");
+    ::AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(m, MF_STRING, kIdTrayFanAuto, L"Fan: Auto (stock)");
+    ::AppendMenuW(m, MF_STRING, kIdTrayFanMax, L"Fan: Max");
+    ::AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    ::AppendMenuW(m, MF_STRING, kIdTrayExit, L"Exit");
+    POINT p; ::GetCursorPos(&p);
+    ::SetForegroundWindow(hwnd);   // so the menu dismisses on click-away
+    ::TrackPopupMenu(m, TPM_RIGHTBUTTON, p.x, p.y, 0, hwnd, nullptr);
+    ::DestroyMenu(m);
+}
 
 enum class View { Dashboard, FanCurve };
 
@@ -408,6 +456,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 tick();
             }
             ::SetTimer(hwnd, kTimerId, 1000, nullptr);
+            addTrayIcon(hwnd);
+            return 0;
+        case WM_TRAYICON:
+            if (LOWORD(lp) == WM_LBUTTONUP || LOWORD(lp) == WM_LBUTTONDBLCLK)
+                showMainWindow(hwnd);
+            else if (LOWORD(lp) == WM_RBUTTONUP)
+                showTrayMenu(hwnd);
+            return 0;
+        case WM_SYSCOMMAND:
+            if ((wp & 0xFFF0) == SC_MINIMIZE) { ::ShowWindow(hwnd, SW_HIDE); return 0; }
+            return ::DefWindowProcW(hwnd, msg, wp, lp);
+        case WM_CLOSE:
+            if (!g_reallyExit) { ::ShowWindow(hwnd, SW_HIDE); return 0; }  // hide to tray
+            ::DestroyWindow(hwnd);
             return 0;
         case WM_TIMER:
             tick();
@@ -423,6 +485,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (id == kIdBtnMax)   { std::string e; if (!g_arc.fanSetFixed(100, e)) ::MessageBoxW(hwnd, widen(e).c_str(), L"Fan", MB_ICONWARNING); return 0; }
             if (id == kIdBtnApplyCurve) { applyCurve(hwnd); return 0; }
             if (id == kIdBtnResetCurve) { g_curve = defaultCurve(); ::InvalidateRect(hwnd, nullptr, TRUE); return 0; }
+            if (id == kIdTrayOpen) { showMainWindow(hwnd); return 0; }
+            if (id == kIdTrayFanAuto) { std::string e; if (!g_arc.fanSetAuto(e)) ::MessageBoxW(hwnd, widen(e).c_str(), L"Fan", MB_ICONWARNING); return 0; }
+            if (id == kIdTrayFanMax) { std::string e; if (!g_arc.fanSetFixed(100, e)) ::MessageBoxW(hwnd, widen(e).c_str(), L"Fan", MB_ICONWARNING); return 0; }
+            if (id == kIdTrayExit) { g_reallyExit = true; ::DestroyWindow(hwnd); return 0; }
             return 0;
         }
         case WM_LBUTTONDOWN:    onLDown(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
@@ -433,6 +499,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_PAINT:          onPaint(hwnd); return 0;
         case WM_DESTROY:
             ::KillTimer(hwnd, kTimerId);
+            removeTrayIcon();
             ::PostQuitMessage(0);
             return 0;
     }
@@ -441,7 +508,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int nShow) {
+    // "--tray" (used by the login auto-start entry): start hidden, tray only.
+    const bool startInTray = lpCmdLine && ::wcsstr(lpCmdLine, L"tray") != nullptr;
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES};
     ::InitCommonControlsEx(&icc);
 
@@ -463,7 +532,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow) {
         CW_USEDEFAULT, CW_USEDEFAULT, 780, 560, nullptr, nullptr, hInst, nullptr);
     if (!hwnd) return 1;
 
-    ::ShowWindow(hwnd, nShow);
+    ::ShowWindow(hwnd, startInTray ? SW_HIDE : nShow);
     ::UpdateWindow(hwnd);
 
     MSG m;

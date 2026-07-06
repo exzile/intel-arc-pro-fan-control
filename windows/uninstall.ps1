@@ -37,6 +37,9 @@ if (Test-Path $svcExe) {
 $lnk = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Arc GPU Dashboard.lnk'
 if (Test-Path $lnk) { Remove-Item -Force $lnk }
 
+# Remove the login auto-start entry for the tray icon.
+Remove-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ArcGpuControl' -ErrorAction SilentlyContinue
+
 if (Test-Path $InstallDir) {
     Write-Host "Removing $InstallDir ..."
     Remove-Item -Recurse -Force $InstallDir
