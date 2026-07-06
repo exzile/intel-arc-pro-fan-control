@@ -1163,6 +1163,8 @@ class VoltageCurveView(Gtk.Box):
         self._tgt = []             # cached monotonic target curve (mV per point)
         self._drag = None
         self._loading = True
+        self.vsec = self.msec = self.tsec = None   # OC section boxes (gated on unsupported GPUs)
+        self._oc_gated_done = False
 
         # ===== top strip: live telemetry (left) + profile manager (right) =====
         top = Gtk.Box(spacing=8); top.add_css_class("mode-row")
@@ -1179,11 +1181,14 @@ class VoltageCurveView(Gtk.Box):
         self.prof_dd = Gtk.DropDown.new_from_strings(["(none saved)"])
         self.prof_dd.set_sensitive(False)
         top.append(self.prof_dd)
-        top.append(icon_button("list-add-symbolic", "Save the current settings as a new profile",
-                               self._prof_save, label="Save"))
-        top.append(icon_button("document-open-symbolic", "Load the selected profile",
-                               self._prof_load, label="Load"))
-        top.append(icon_button("user-trash-symbolic", "Delete the selected profile", self._prof_delete))
+        self.prof_save_btn = icon_button("list-add-symbolic", "Save the current settings as a new profile",
+                                         self._prof_save, label="Save")
+        top.append(self.prof_save_btn)
+        self.prof_load_btn = icon_button("document-open-symbolic", "Load the selected profile",
+                                         self._prof_load, label="Load")
+        top.append(self.prof_load_btn)
+        self.prof_del_btn = icon_button("user-trash-symbolic", "Delete the selected profile", self._prof_delete)
+        top.append(self.prof_del_btn)
         self.append(top)
 
         # ===== two-column body: voltage (left) · power / memory / thermal (right) =====
@@ -1246,6 +1251,7 @@ class VoltageCurveView(Gtk.Box):
                 "A safety cap on how high voltage may go.",
             on_change=self._on_knob)
         vsec.append(vgrid)
+        self.vsec = vsec
         left.append(vsec)
 
         # --- Section: Power & clocks ---
@@ -1311,7 +1317,7 @@ class VoltageCurveView(Gtk.Box):
                 14.0, 24.0, 0.1, 19.0, "Gbps", digits=2,
                 tip="GDDR6 data rate. Higher = more VRAM bandwidth; raise cautiously.",
                 on_change=self._on_knob)
-            msec.append(mgrid); right.append(msec)
+            msec.append(mgrid); self.msec = msec; right.append(msec)
 
         # --- Section: Thermal ---
         self.f_temp = None
@@ -1326,7 +1332,7 @@ class VoltageCurveView(Gtk.Box):
                 60, 100, 1, 100, "°C",
                 tip="Thermal-throttle target. Higher = more sustained clock before throttling; "
                     "lower = cooler/quieter.", on_change=self._on_knob)
-            tsec.append(tgrid); right.append(tsec)
+            tsec.append(tgrid); self.tsec = tsec; right.append(tsec)
 
         # --- action bar (full width) ---
         bar = Gtk.Box(spacing=8)
@@ -1340,8 +1346,9 @@ class VoltageCurveView(Gtk.Box):
         bar.append(self.test_btn)
         bar.append(icon_button("view-refresh-symbolic", "Re-read everything from the GPU",
                                lambda *_: self._load(), label="Reload"))
-        bar.append(icon_button("edit-undo-symbolic", "Restore stock curve + memory + temp",
-                               self._reset, label="Reset"))
+        self.reset_btn = icon_button("edit-undo-symbolic", "Restore stock curve + memory + temp",
+                                     self._reset, label="Reset")
+        bar.append(self.reset_btn)
         self.apply_btn = icon_button("emblem-ok-symbolic",
                                      "Apply changed settings — asks for authorization",
                                      self._apply, label="Apply", css="suggested-action")
@@ -1514,7 +1521,26 @@ class VoltageCurveView(Gtk.Box):
                 self.profile_dd.set_selected(opts.index(prof["current"]))
         self._prof_refresh()
         self._hint(); self.area.queue_draw(); self._mark()
+        self._apply_oc_gate(bool(data))
         return False
+
+    def _apply_oc_gate(self, functional):
+        # The voltage-curve / memory-speed / temperature-limit controls ride on the
+        # xe_gt_oc PCODE ops, which the Arc Pro B70 (Battlemage G31) firmware rejects
+        # (the driver reports them unsupported, so vf_curve reads back empty). Gray those
+        # sections out — power cap and clock limits (plain driver sysfs) keep working.
+        if functional or self._oc_gated_done:
+            return
+        self._oc_gated_done = True
+        for w in (self.vsec, self.msec, self.tsec, self.prof_dd, self.prof_save_btn,
+                  self.prof_load_btn, self.prof_del_btn, self.reset_btn):
+            if w is not None:
+                w.set_sensitive(False)
+        banner = Adw.Banner(title=(
+            "Overclocking isn't available on this GPU — its firmware doesn't expose the "
+            "voltage curve, memory speed, or temperature limit. Power and clock limits still work."))
+        banner.set_revealed(True)
+        self.prepend(banner)
 
     def _prof_sel(self):
         if self.profile_dd is None:
