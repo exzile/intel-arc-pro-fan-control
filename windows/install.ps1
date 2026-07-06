@@ -8,25 +8,30 @@
 #   powershell -ExecutionPolicy Bypass -File windows\install.ps1
 #
 # Options:
-#   -BuildDir <path>    where the .exe files are (default: build\Release)
-#   -NoService          copy binaries but don't register the service
-#   -AddToPath          add the install dir to the system PATH
-#   -KeepIntelService   do NOT disable Intel's Graphics Software service
+#   -BuildDir <path>       where the .exe files are (default: build\Release)
+#   -NoService             copy binaries but don't register the service
+#   -AddToPath             add the install dir to the system PATH
+#   -DisableIntelService   fan-only: disable Intel's Graphics Software service
 #
-# By default this DISABLES the Intel Graphics Software service, because it holds
-# EXCLUSIVE ownership of the GPU fan and overclock controls - while it runs, our
-# fan/OC writes are ignored (the driver reports canControl=false). Disabling it
-# lets ArcFanControl own the fan + overclocking. Trade-off: the Intel Arc Control
-# app's live tuning/telemetry stops working. uninstall.ps1 re-enables it.
+# The Intel Graphics Software service is REQUIRED for overclocking: it is the
+# precondition for ctlOverclockWaiverSet (without it running, every OC write
+# returns UNSUPPORTED_FEATURE 0x4000000a). It does NOT block our fan control -
+# fan and OC both work while it runs (verified: fan reaches full RPM + OC freq
+# offset applies with the service up). So by default we KEEP it enabled.
+#
+# Pass -DisableIntelService only if you want fan control with zero possibility of
+# the Intel Arc app contending the fan curve, and you don't need overclocking.
+# Doing so DISABLES overclocking (the waiver can no longer be set).
 [CmdletBinding()]
 param(
     [string]$BuildDir = (Join-Path $PSScriptRoot 'build\Release'),
     [switch]$NoService,
     [switch]$AddToPath,
-    [switch]$KeepIntelService
+    [switch]$DisableIntelService
 )
 
-# Intel services that exclusively own fan/OC. Disabling these hands control to us.
+# The Intel service is the overclock-waiver precondition; keep it running unless
+# the user explicitly opts into fan-only (-DisableIntelService).
 $IntelOwnerServices = @('IntelGraphicsSoftwareService', 'IGSDSserviceDiscrete')
 
 $ErrorActionPreference = 'Stop'
@@ -98,21 +103,36 @@ try {
     Write-Warning "Could not register tray auto-start: $_"
 }
 
-# Disable Intel's fan/OC ownership so our service/tools can control the hardware.
-if (-not $KeepIntelService) {
+if (-not $DisableIntelService) {
+    # Keep the Intel service ENABLED + running: it is the overclock-waiver
+    # precondition (OC writes return UNSUPPORTED_FEATURE without it). Our fan
+    # control coexists with it, so there is no reason to disable it by default.
+    foreach ($svc in $IntelOwnerServices) {
+        $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+        if (-not $s) { continue }
+        try {
+            $startType = if ($svc -eq 'IntelGraphicsSoftwareService') { 'Automatic' } else { 'Manual' }
+            Set-Service -Name $svc -StartupType $startType -ErrorAction Stop
+            if ($s.Status -ne 'Running') { Start-Service -Name $svc -ErrorAction SilentlyContinue }
+            Write-Host "Ensured '$($s.DisplayName)' ($svc) is enabled - required for overclocking."
+        } catch {
+            Write-Warning "Could not enable ${svc}: $_"
+        }
+    }
+} else {
+    # Fan-only: disable the Intel service. This DISABLES overclocking.
     foreach ($svc in $IntelOwnerServices) {
         $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
         if (-not $s) { continue }
         try {
             if ($s.Status -ne 'Stopped') { Stop-Service -Name $svc -Force -ErrorAction Stop }
             Set-Service -Name $svc -StartupType Disabled -ErrorAction Stop
-            Write-Host "Disabled '$($s.DisplayName)' ($svc) - ArcFanControl now owns the fan/OC."
+            Write-Host "Disabled '$($s.DisplayName)' ($svc) - fan-only mode, overclocking unavailable."
         } catch {
             Write-Warning "Could not disable ${svc}: $_"
         }
     }
-} else {
-    Write-Warning 'Left Intel Graphics Software service running (-KeepIntelService): fan/OC writes will be ignored while it owns the hardware.'
+    Write-Warning 'Overclocking is DISABLED (-DisableIntelService). Re-run install.ps1 without that switch to restore OC.'
 }
 
 if (-not $NoService) {

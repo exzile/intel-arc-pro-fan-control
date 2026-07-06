@@ -127,6 +127,12 @@ Its log is `%ProgramData%\ArcFanControl\service.log`.
 - **Units differ from Linux.** The Linux CLI uses PWM `0-255`; IGCL fan tables
   use **percent (0-100)**, so this port speaks percent. `fan_curve.hpp` has a
   `pwmToPercent()` helper if you're porting an old curve.
+- **Overclocking needs the Intel Graphics Software service running.** It is the
+  precondition for the IGCL overclock waiver — with the service stopped/disabled,
+  every OC write returns `UNSUPPORTED_FEATURE (0x4000000a)`. `install.ps1` keeps
+  it enabled by default. The service does **not** contend fan control (fan and OC
+  both work while it runs). Pass `-DisableIntelService` only for fan-only setups
+  that don't need OC.
 - **Overclock warranty waiver.** IGCL requires accepting a warranty waiver
   before voltage / VF-curve writes; the tool sets it for you on those commands.
   Overclocking can reduce the part's lifetime — use at your own risk.

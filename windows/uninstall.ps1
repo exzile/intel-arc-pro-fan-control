@@ -52,7 +52,8 @@ if ($machinePath -like "*$InstallDir*") {
     [Environment]::SetEnvironmentVariable('Path', $new, 'Machine')
 }
 
-# Re-enable the Intel Graphics Software services that install.ps1 disabled.
+# Restore the Intel Graphics Software services to enabled, in case this machine
+# was installed with -DisableIntelService (fan-only). Harmless no-op otherwise.
 $IntelOwnerServices = @('IntelGraphicsSoftwareService', 'IGSDSserviceDiscrete')
 foreach ($svc in $IntelOwnerServices) {
     $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
