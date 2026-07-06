@@ -144,8 +144,19 @@ This is the same wall we started at for the B60, and the same tool breaks it:
    PCODE firmware where the OC opcodes live *is* present on the G31), and the rest is signed/compressed
    (no readable OC strings). So the gate is inside the compiled PCODE logic — a 4-build bump *could*
    flip it but far more likely carries minor fixes, and Pro-SKU OC gating may be intentional. We
-   **did not flash** (user directive + documented Gen5→Gen4 permanent-downgrade risk on this card).
-   Whether `1062` enables OC is only knowable by flashing (off the table) or by #2 below.
+   **did not flash** (user directive; note the "Gen5→Gen4 downgrade" community reports are a separate
+   *out-of-box* hardware/fw defect Intel is investigating, **not** a proven consequence of flashing —
+   and it's moot here anyway: this Z370 board is PCIe **Gen3**, below both).
+
+   **Deep firmware structure (dead end for extracting the opcodes).** The `.bin` is a CSE/GSC `$FPT`
+   container → `FWIM` partition → nested `$CPD` with a `PCODE_0` module. Findings:
+   - G21 (OC works) vs G31 (OC rejected) firmware differ by **35.1%** (737 KB / 2 MB) — identical
+     container layout (`PCODE_0` at the same offset in both), heavily die-specific module *contents*.
+   - The `PCODE_0` module is **signed + proprietary-compressed**, on an **undocumented PCODE
+     microcontroller ISA**. `MEAnalyzer` v1.311 doesn't recognize this new BMG G31 image; the
+     Solaris17 firmware archive has **only consumer G21** builds (no G31 to diff across versions).
+   - Conclusion: the firmware confirms *where* the OC gate lives but the dispatch logic is not
+     recoverable to readable form with any public tool. → **#2 (DTrace) is the only tractable route.**
 2. **Definitive: DTrace the B70's Windows driver** while its OC UI applies a change (exactly how the
    B60 sequence — the missing `0x5f/2` begin — was found). Captures the G31's real
    opcode/domain/sequence. Needs Windows + the card + DTrace.
