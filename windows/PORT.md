@@ -36,7 +36,7 @@ The alternatives considered and why IGCL won:
 | VRAM bandwidth | **not available on Linux xe** | telemetry bandwidth counters | ✅ (bonus) |
 | Throttle reasons | `freq0/throttle/reason_*` | telemetry `gpu*Limited` flags | ✅ |
 | Boot persistence | systemd `*.service` | `arc-fan-service` (SCM) | ✅ |
-| Multi-GPU targeting | `ARC_GPU_BDF` | `--bdf` / `ARC_GPU_BDF` | ✅ |
+| Multi-GPU targeting | `ARC_GPU_BDF` | `--gpu <index\|deviceid>` + per-adapter profiles | ✅ |
 | Native GUI | GTK4 `xe-gpu-gui` | Win32/GDI `arc-gpu-gui` | 🟡 dashboard + draggable fan-curve editor done; OC tab pending |
 | Per-sensor temp table | `xe-gpu-temps` (12 VRAM channels) | `ctlEnumTemperatureSensors` → `arc-gpu temps` | ✅ (IGCL exposes GPU/VRAM/global, not 12 VRAM channels) |
 | Named OC profiles | `xe-gpu-oc profile save/load` | `arc-gpu oc profile save/load/list/delete` | ✅ |

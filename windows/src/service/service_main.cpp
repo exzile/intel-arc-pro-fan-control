@@ -99,20 +99,40 @@ void setState(DWORD state, DWORD exitCode = NO_ERROR, DWORD waitHint = 0) {
 // process, so init is done ONCE in runLoop and the handle is held for the
 // service lifetime. Returns false if the apply failed (handle may be stale).
 bool applyOnce(ArcController& a) {
-    AppConfig cfg;
+    MultiConfig cfg;
     std::string err;
-    loadConfig(cfg, err);
-    if (cfg.fanMode == FanMode::None && !cfg.ocApply) {
-        logLine("no saved profile to apply");
-        return true;
+    loadAllConfigs(cfg, err);
+
+    bool anyProfile = false;
+    bool allFansOk = true;      // false only if a FAN failed (driver not ready)
+    int applied = 0;
+    std::string warnings;
+
+    // Apply EACH adapter's own profile (multi-GPU). Profiles are keyed by PCI
+    // device id; find() falls back to the [adapter.default] profile.
+    for (size_t i = 0; i < a.adapters().size(); ++i) {
+        const std::string key = a.adapters()[i].key();
+        const AppConfig* p = cfg.find(key);
+        if (!p || (p->fanMode == FanMode::None && !p->ocApply)) continue;
+        anyProfile = true;
+
+        std::string sel;
+        if (!a.selectByIndex(i, sel)) { allFansOk = false; warnings += "[" + key + "] select: " + sel + "; "; continue; }
+
+        std::string applyErr;
+        bool fanOk = true;
+        if (applyProfile(a, *p, applyErr, &fanOk)) ++applied;
+        else warnings += "[" + key + "] " + applyErr;   // e.g. gated B70 OC — tolerated
+        if (!fanOk) allFansOk = false;                   // a failed fan => not ready
     }
-    std::string applyErr;
-    if (applyProfile(a, cfg, applyErr)) {
-        logLine("profile applied");
-        return true;
-    }
-    logLine("profile applied with warnings: " + applyErr);
-    return false;
+
+    if (!anyProfile) { logLine("no saved profile to apply"); return true; }
+    if (warnings.empty()) logLine("profiles applied (" + std::to_string(applied) + " adapter(s))");
+    else                  logLine("profiles applied with warnings: " + warnings);
+
+    // Only re-init/retry when a FAN failed (cold-boot not-ready); an expected OC
+    // failure on the firmware-gated B70 must not cause an endless retry loop.
+    return allFansOk;
 }
 
 DWORD WINAPI ServiceCtrlHandler(DWORD ctrl, DWORD, LPVOID, LPVOID) {

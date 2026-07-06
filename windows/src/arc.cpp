@@ -61,6 +61,12 @@ std::string AdapterInfo::bdfString() const {
     return buf;
 }
 
+std::string AdapterInfo::key() const {
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "%04x", pciDeviceId);
+    return buf;
+}
+
 bool ArcController::init(std::string& err) {
     if (!lib_.load()) {
         err = lib_.error();
@@ -177,6 +183,14 @@ bool ArcController::selectByBdf(const std::string& bdf, std::string& err) {
         }
     }
     err = "no adapter matching BDF '" + bdf + "'";
+    return false;
+}
+
+bool ArcController::selectByKey(const std::string& key, std::string& err) {
+    for (size_t i = 0; i < adapters_.size(); ++i) {
+        if (adapters_[i].key() == key) return selectByIndex(i, err);
+    }
+    err = "no adapter with key '" + key + "'";
     return false;
 }
 

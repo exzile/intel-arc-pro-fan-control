@@ -7,6 +7,7 @@
 // Stored as a small INI at %ProgramData%\ArcFanControl\config.ini.
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 #include "arc.hpp"
@@ -43,11 +44,30 @@ std::string configPath();
 bool ensureConfigDir(std::string& err);
 
 // Load config. A missing file yields defaults and returns true. Returns false
-// only on an unreadable/corrupt file.
+// only on an unreadable/corrupt file. (Legacy single-profile accessor: returns
+// the "default" profile — the one that applies to any adapter without its own.)
 bool loadConfig(AppConfig& out, std::string& err);
 
-// Persist config (creates the directory as needed).
+// Persist config as the "default" profile (creates the directory as needed).
 bool saveConfig(const AppConfig& cfg, std::string& err);
+
+// --- Per-adapter profiles (multi-GPU) ---------------------------------------
+// Each GPU has its own fan/OC profile keyed by AdapterInfo::key() (PCI device id,
+// e.g. "e211" = B60, "e223" = B70). The empty key "" is the DEFAULT profile that
+// applies to any adapter without its own entry (and is where a legacy single
+// profile migrates). Stored as [adapter.<key>] sections; "" is [adapter.default].
+struct MultiConfig {
+    std::map<std::string, AppConfig> byKey;
+    // Effective profile for an adapter key: its own entry, else the default (""),
+    // else nullptr.
+    const AppConfig* find(const std::string& key) const;
+};
+
+bool loadAllConfigs(MultiConfig& out, std::string& err);
+bool saveAllConfigs(const MultiConfig& cfg, std::string& err);
+// Load/save one adapter's profile, preserving every other adapter's section.
+bool loadConfigFor(const std::string& key, AppConfig& out, std::string& err);
+bool saveConfigFor(const std::string& key, const AppConfig& cfg, std::string& err);
 
 // --- Named overclock profiles (mirrors `xe-gpu-oc profile save/load/list`) ---
 // Stored as individual INI files under configDir()\profiles\<name>.ini.

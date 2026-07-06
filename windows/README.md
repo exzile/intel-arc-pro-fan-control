@@ -127,6 +127,13 @@ Its log is `%ProgramData%\ArcFanControl\service.log`.
 - **Units differ from Linux.** The Linux CLI uses PWM `0-255`; IGCL fan tables
   use **percent (0-100)**, so this port speaks percent. `fan_curve.hpp` has a
   `pwmToPercent()` helper if you're porting an old curve.
+- **Multi-GPU: each card has its own profile.** IGCL reports BDF `00:00.0` for
+  every adapter, so profiles are keyed by **PCI device id** (`e211` = B60,
+  `e223` = B70) and stored as `[adapter.<id>]` sections in `config.ini`. The
+  service applies each card's own profile; `[adapter.default]` covers any card
+  without one. In the GUI, pick the card in the dropdown before editing — the
+  curve is saved for *that* card. From the CLI, target a card with
+  `arc-gpu --gpu <index|deviceid> …` (e.g. `--gpu e223` or `--gpu 1`).
 - **We own both fan and overclock with the Intel service disabled.** Overclocking
   does **not** require the Intel Graphics Software service — it only requires an
   admin process and a driver that has finished initializing. Our boot service runs

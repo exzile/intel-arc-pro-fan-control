@@ -138,8 +138,16 @@ std::vector<FanPoint> defaultCurve() {
 
 void loadEditorCurve() {
     std::string err;
-    if (!g_arc.fanGetCurve(g_curve, err) || g_curve.size() < 2)
+    // Prefer the SELECTED adapter's saved curve (so switching cards shows that
+    // card's profile); else the live curve; else a sane default.
+    const AdapterInfo* d = g_arc.current();
+    AppConfig cfg;
+    loadConfigFor(d ? d->key() : std::string(), cfg, err);
+    if (cfg.fanMode == FanMode::Curve && cfg.curve.size() >= 2) {
+        g_curve = cfg.curve;
+    } else if (!g_arc.fanGetCurve(g_curve, err) || g_curve.size() < 2) {
         g_curve = defaultCurve();
+    }
     std::sort(g_curve.begin(), g_curve.end(),
               [](const FanPoint& a, const FanPoint& b) { return a.temperatureC < b.temperatureC; });
 }
@@ -374,15 +382,18 @@ void nudgeService() {
     // If the service isn't running, its next start / 60s cycle picks up the config.
 }
 
-// Save the fan portion of the profile and ask the service to apply it now.
+// Save the fan portion of the SELECTED adapter's profile and ask the service to
+// apply it now. Keyed by the current adapter (PCI device id) so a B70 curve is
+// stored for the B70 — not merged onto the B60.
 bool saveFanProfile(HWND hwnd, FanMode mode, const std::vector<FanPoint>& curve, int fixedPct) {
     std::string err;
-    AppConfig cfg; loadConfig(cfg, err);
-    if (const AdapterInfo* d = g_arc.current()) cfg.bdf = d->bdfString();
+    const AdapterInfo* d = g_arc.current();
+    const std::string key = d ? d->key() : std::string();
+    AppConfig cfg; loadConfigFor(key, cfg, err);   // preserve this adapter's OC settings
     cfg.fanMode = mode;
     if (mode == FanMode::Curve) cfg.curve = curve;
     if (mode == FanMode::Fixed) cfg.fixedPercent = fixedPct;
-    if (!saveConfig(cfg, err)) {
+    if (!saveConfigFor(key, cfg, err)) {
         ::MessageBoxW(hwnd, widen("Could not save profile: " + err).c_str(), L"Fan", MB_ICONWARNING);
         return false;
     }

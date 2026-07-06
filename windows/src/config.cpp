@@ -60,61 +60,93 @@ bool ensureConfigDir(std::string& err) {
 
 namespace {
 
-void parseInto(std::istream& f, AppConfig& out) {
+// Apply one key=value to a profile. `section` is "fan"/"oc" for the LEGACY
+// sectioned format, or "" for the flat per-adapter / named-profile keys
+// (fan_mode, fan_curve, oc_apply, oc_freq_offset, ...).
+void applyKV(AppConfig& c, const std::string& section,
+             const std::string& key, const std::string& val) {
+    auto setD  = [&](bool& has, double& dst) { try { dst = std::stod(val); has = true; } catch (...) {} };
+    auto asInt = [&](int& dst) { try { dst = std::stoi(val); } catch (...) {} };
+    auto asBool = [&]() { return val == "1" || val == "true" || val == "yes"; };
+
+    if (section == "fan") {                                  // legacy [fan]
+        if (key == "mode") c.fanMode = fanModeFromString(val);
+        else if (key == "fixed") asInt(c.fixedPercent);
+        else if (key == "curve") { std::string e; parseFanCurve(val, c.curve, e); }
+        return;
+    }
+    if (section == "oc") {                                   // legacy [oc]
+        if (key == "apply") c.ocApply = asBool();
+        else if (key == "freq_offset") setD(c.hasFreqOffset, c.freqOffset);
+        else if (key == "volt_offset") setD(c.hasVoltOffset, c.voltOffset);
+        else if (key == "mem_speed")   setD(c.hasMemSpeed, c.memSpeed);
+        else if (key == "power_w")     setD(c.hasPowerW, c.powerW);
+        else if (key == "temp_c")      setD(c.hasTempC, c.tempC);
+        return;
+    }
+    // Flat per-adapter / named-profile keys.
+    if (key == "fan_mode") c.fanMode = fanModeFromString(val);
+    else if (key == "fan_fixed") asInt(c.fixedPercent);
+    else if (key == "fan_curve") { std::string e; parseFanCurve(val, c.curve, e); }
+    else if (key == "oc_apply") c.ocApply = asBool();
+    else if (key == "oc_freq_offset") setD(c.hasFreqOffset, c.freqOffset);
+    else if (key == "oc_volt_offset") setD(c.hasVoltOffset, c.voltOffset);
+    else if (key == "oc_mem_speed")   setD(c.hasMemSpeed, c.memSpeed);
+    else if (key == "oc_power_w")     setD(c.hasPowerW, c.powerW);
+    else if (key == "oc_temp_c")      setD(c.hasTempC, c.tempC);
+}
+
+// Serialize one profile's fields as flat keys (no section header).
+void writeProfileBody(std::ostream& o, const AppConfig& c) {
+    o << "fan_mode = " << fanModeToString(c.fanMode) << "\n";
+    o << "fan_fixed = " << c.fixedPercent << "\n";
+    o << "fan_curve = " << formatFanCurve(c.curve) << "\n";
+    o << "oc_apply = " << (c.ocApply ? "true" : "false") << "\n";
+    if (c.hasFreqOffset) o << "oc_freq_offset = " << c.freqOffset << "\n";
+    if (c.hasVoltOffset) o << "oc_volt_offset = " << c.voltOffset << "\n";
+    if (c.hasMemSpeed)   o << "oc_mem_speed = "   << c.memSpeed   << "\n";
+    if (c.hasPowerW)     o << "oc_power_w = "     << c.powerW     << "\n";
+    if (c.hasTempC)      o << "oc_temp_c = "      << c.tempC      << "\n";
+}
+
+// Parse a single-profile file (named profiles) — accepts flat keys + legacy.
+void parseSingle(std::istream& f, AppConfig& out) {
     std::string line, section;
     while (std::getline(f, line)) {
         line = trim(line);
         if (line.empty() || line[0] == '#' || line[0] == ';') continue;
-        if (line.front() == '[' && line.back() == ']') {
-            section = trim(line.substr(1, line.size() - 2));
-            continue;
-        }
+        if (line.front() == '[' && line.back() == ']') { section = trim(line.substr(1, line.size() - 2)); continue; }
         const size_t eq = line.find('=');
         if (eq == std::string::npos) continue;
-        const std::string key = trim(line.substr(0, eq));
-        const std::string val = trim(line.substr(eq + 1));
-
-        if (section == "fan") {
-            if (key == "mode") out.fanMode = fanModeFromString(val);
-            else if (key == "fixed") { try { out.fixedPercent = std::stoi(val); } catch (...) {} }
-            else if (key == "curve") { std::string e; parseFanCurve(val, out.curve, e); }
-        } else if (section == "oc") {
-            auto setD = [&](bool& has, double& dst) {
-                try { dst = std::stod(val); has = true; } catch (...) {}
-            };
-            if (key == "apply") out.ocApply = (val == "1" || val == "true" || val == "yes");
-            else if (key == "freq_offset") setD(out.hasFreqOffset, out.freqOffset);
-            else if (key == "volt_offset") setD(out.hasVoltOffset, out.voltOffset);
-            else if (key == "mem_speed")   setD(out.hasMemSpeed, out.memSpeed);
-            else if (key == "power_w")     setD(out.hasPowerW, out.powerW);
-            else if (key == "temp_c")      setD(out.hasTempC, out.tempC);
-        } else if (section == "adapter") {
-            if (key == "bdf") out.bdf = val;
-        }
+        const std::string sec = (section == "fan" || section == "oc") ? section : "";
+        applyKV(out, sec, trim(line.substr(0, eq)), trim(line.substr(eq + 1)));
     }
 }
 
-std::string serialize(const AppConfig& cfg) {
-    std::ostringstream o;
-    o << "# Arc Fan Control profile — re-applied at boot by the ArcFanControl service.\n";
-    o << "# Managed by arc-gpu; hand-edits are preserved on the next save.\n\n";
+// Parse the multi-adapter config. [adapter.<key>] -> byKey[<key>];
+// [adapter.default] or a legacy [fan]/[oc] file -> byKey[""] (the default bucket).
+void parseMulti(std::istream& f, MultiConfig& out) {
+    std::string line, section;
+    while (std::getline(f, line)) {
+        line = trim(line);
+        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+        if (line.front() == '[' && line.back() == ']') { section = trim(line.substr(1, line.size() - 2)); continue; }
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = trim(line.substr(0, eq)), val = trim(line.substr(eq + 1));
 
-    o << "[adapter]\n";
-    o << "bdf = " << cfg.bdf << "\n\n";
-
-    o << "[fan]\n";
-    o << "mode = " << fanModeToString(cfg.fanMode) << "\n";
-    o << "fixed = " << cfg.fixedPercent << "\n";
-    o << "curve = " << formatFanCurve(cfg.curve) << "\n\n";
-
-    o << "[oc]\n";
-    o << "apply = " << (cfg.ocApply ? "true" : "false") << "\n";
-    if (cfg.hasFreqOffset) o << "freq_offset = " << cfg.freqOffset << "\n";
-    if (cfg.hasVoltOffset) o << "volt_offset = " << cfg.voltOffset << "\n";
-    if (cfg.hasMemSpeed)   o << "mem_speed = "   << cfg.memSpeed   << "\n";
-    if (cfg.hasPowerW)     o << "power_w = "     << cfg.powerW     << "\n";
-    if (cfg.hasTempC)      o << "temp_c = "      << cfg.tempC      << "\n";
-    return o.str();
+        std::string adKey, sec;
+        if (section.rfind("adapter.", 0) == 0) {
+            adKey = section.substr(8);
+            if (adKey == "default") adKey = "";
+            sec = "";                                  // flat keys
+        } else if (section == "fan" || section == "oc") {
+            adKey = ""; sec = section;                 // legacy -> default bucket
+        } else {
+            continue;                                  // legacy [adapter] bdf, unknown
+        }
+        applyKV(out.byKey[adKey], sec, key, val);
+    }
 }
 
 bool writeFile(const std::string& path, const std::string& body, std::string& err) {
@@ -127,17 +159,58 @@ bool writeFile(const std::string& path, const std::string& body, std::string& er
 
 } // namespace
 
-bool loadConfig(AppConfig& out, std::string& err) {
-    out = AppConfig{};
+const AppConfig* MultiConfig::find(const std::string& key) const {
+    auto it = byKey.find(key);
+    if (it != byKey.end()) return &it->second;
+    it = byKey.find("");
+    if (it != byKey.end()) return &it->second;
+    return nullptr;
+}
+
+bool loadAllConfigs(MultiConfig& out, std::string& err) {
+    out = MultiConfig{};
     std::ifstream f(configPath());
-    if (!f.is_open()) return true;   // no file yet => defaults
-    parseInto(f, out);
+    if (!f.is_open()) return true;   // no file yet => empty
+    parseMulti(f, out);
     return true;
 }
 
-bool saveConfig(const AppConfig& cfg, std::string& err) {
+bool saveAllConfigs(const MultiConfig& cfg, std::string& err) {
     if (!ensureConfigDir(err)) return false;
-    return writeFile(configPath(), serialize(cfg), err);
+    std::ostringstream o;
+    o << "# Arc Fan Control profiles — one per GPU, re-applied at boot by the service.\n";
+    o << "# Sections are keyed by PCI device id: e211 = Arc Pro B60, e223 = B70.\n";
+    o << "# [adapter.default] applies to any adapter without its own section.\n\n";
+    for (const auto& kv : cfg.byKey) {
+        const std::string name = kv.first.empty() ? "default" : kv.first;
+        o << "[adapter." << name << "]\n";
+        writeProfileBody(o, kv.second);
+        o << "\n";
+    }
+    return writeFile(configPath(), o.str(), err);
+}
+
+bool loadConfigFor(const std::string& key, AppConfig& out, std::string& err) {
+    MultiConfig m;
+    if (!loadAllConfigs(m, err)) return false;
+    const AppConfig* p = m.find(key);
+    out = p ? *p : AppConfig{};
+    return true;
+}
+
+bool saveConfigFor(const std::string& key, const AppConfig& cfg, std::string& err) {
+    MultiConfig m;
+    if (!loadAllConfigs(m, err)) return false;   // preserve other adapters' sections
+    m.byKey[key] = cfg;
+    return saveAllConfigs(m, err);
+}
+
+bool loadConfig(AppConfig& out, std::string& err) {
+    return loadConfigFor("", out, err);          // the default profile
+}
+
+bool saveConfig(const AppConfig& cfg, std::string& err) {
+    return saveConfigFor("", cfg, err);          // write as the default profile
 }
 
 std::string profilesDir() {
@@ -180,14 +253,17 @@ bool saveNamedProfile(const std::string& name, const AppConfig& cfg, std::string
         err = "cannot create profiles directory '" + dir + "'";
         return false;
     }
-    return writeFile(profilePath(name), serialize(cfg), err);
+    std::ostringstream body;
+    body << "# Arc named overclock/fan profile.\n\n";
+    writeProfileBody(body, cfg);
+    return writeFile(profilePath(name), body.str(), err);
 }
 
 bool loadNamedProfile(const std::string& name, AppConfig& out, std::string& err) {
     out = AppConfig{};
     std::ifstream f(profilePath(name));
     if (!f.is_open()) { err = "profile '" + name + "' not found"; return false; }
-    parseInto(f, out);
+    parseSingle(f, out);
     return true;
 }
 

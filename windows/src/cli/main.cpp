@@ -67,6 +67,13 @@ int fail(const std::string& msg) {
     return 1;
 }
 
+// Per-adapter profile key for the currently-selected GPU (PCI device id hex, e.g.
+// "e211" = B60, "e223" = B70). Profiles are stored/applied per adapter.
+std::string curKey(ArcController& a) {
+    const AdapterInfo* d = a.current();
+    return d ? d->key() : std::string();
+}
+
 // Two telemetry samples an interval apart give instantaneous rate metrics.
 bool sampleMetrics(ArcController& a, Metrics& out, std::string& err) {
     Telemetry t0, t1;
@@ -154,10 +161,9 @@ int cmdFan(ArcController& a, const std::vector<std::string>& args) {
         return 0;
     }
 
-    // Mutating subcommands: apply now + persist to the profile.
+    // Mutating subcommands: apply now + persist to THIS adapter's profile.
     AppConfig cfg;
-    loadConfig(cfg, err);
-    if (const AdapterInfo* d = a.current()) cfg.bdf = d->bdfString();
+    loadConfigFor(curKey(a), cfg, err);
 
     if (sub == "auto") {
         if (!a.fanSetAuto(err)) return fail(err);
@@ -183,7 +189,7 @@ int cmdFan(ArcController& a, const std::vector<std::string>& args) {
         return fail("unknown fan subcommand '" + sub + "'");
     }
 
-    if (!saveConfig(cfg, err))
+    if (!saveConfigFor(curKey(a), cfg, err))
         std::fprintf(stderr, "arc-gpu: applied, but could not save profile: %s\n", err.c_str());
     else
         std::printf("OK (saved to %s)\n", configPath().c_str());
@@ -208,10 +214,9 @@ int cmdTune(ArcController& a, const std::vector<std::string>& args) {
         if (args.size() < 2) return fail("tune power needs Watts");
         double w = std::atof(args[1].c_str());
         if (!a.setPowerLimit(w, err)) return fail(err);
-        AppConfig cfg; loadConfig(cfg, err);
-        if (const AdapterInfo* d = a.current()) cfg.bdf = d->bdfString();
+        AppConfig cfg; loadConfigFor(curKey(a), cfg, err);
         cfg.ocApply = true; cfg.hasPowerW = true; cfg.powerW = w;
-        saveConfig(cfg, err);
+        saveConfigFor(curKey(a), cfg, err);
         std::printf("OK\n");
         return 0;
     }
@@ -251,7 +256,6 @@ int cmdOcProfile(ArcController& a, const std::vector<std::string>& args) {
         if (!a.ocGetState(s, err)) return fail(err);
         AppConfig cfg;
         cfg.ocApply = true;
-        if (const AdapterInfo* d = a.current()) cfg.bdf = d->bdfString();
         cfg.hasFreqOffset = s.hasGpuFreqOffset; cfg.freqOffset = s.gpuFreqOffset;
         cfg.hasVoltOffset = s.hasGpuVoltOffset; cfg.voltOffset = s.gpuVoltOffset;
         cfg.hasMemSpeed   = s.hasMemSpeed;      cfg.memSpeed   = s.memSpeed;
@@ -267,16 +271,16 @@ int cmdOcProfile(ArcController& a, const std::vector<std::string>& args) {
         std::string ae;
         if (!applyProfile(a, named, ae))
             std::fprintf(stderr, "arc-gpu: profile applied with warnings: %s\n", ae.c_str());
-        // Merge the OC subset into the active profile so the service re-applies it.
+        // Merge the OC subset into THIS adapter's profile so the service re-applies it.
         AppConfig active;
-        loadConfig(active, err);
+        loadConfigFor(curKey(a), active, err);
         active.ocApply = named.ocApply;
         active.hasFreqOffset = named.hasFreqOffset; active.freqOffset = named.freqOffset;
         active.hasVoltOffset = named.hasVoltOffset; active.voltOffset = named.voltOffset;
         active.hasMemSpeed   = named.hasMemSpeed;   active.memSpeed   = named.memSpeed;
         active.hasPowerW     = named.hasPowerW;     active.powerW     = named.powerW;
         active.hasTempC      = named.hasTempC;      active.tempC      = named.tempC;
-        saveConfig(active, err);
+        saveConfigFor(curKey(a), active, err);
         std::printf("Loaded profile '%s'.\n", name.c_str());
         return 0;
     }
@@ -311,9 +315,8 @@ int cmdOc(ArcController& a, const std::vector<std::string>& args) {
         return 0;
     }
 
-    // Persisted setters.
-    AppConfig cfg; loadConfig(cfg, err);
-    if (const AdapterInfo* d = a.current()) cfg.bdf = d->bdfString();
+    // Persisted setters (this adapter's profile).
+    AppConfig cfg; loadConfigFor(curKey(a), cfg, err);
     cfg.ocApply = true;
 
     if (sub == "freq") {
@@ -352,7 +355,7 @@ int cmdOc(ArcController& a, const std::vector<std::string>& args) {
         return fail("unknown oc subcommand '" + sub + "'");
     }
 
-    saveConfig(cfg, err);
+    saveConfigFor(curKey(a), cfg, err);
     std::printf("OK\n");
     return 0;
 }
@@ -360,7 +363,7 @@ int cmdOc(ArcController& a, const std::vector<std::string>& args) {
 int cmdApply(ArcController& a) {
     AppConfig cfg;
     std::string err;
-    loadConfig(cfg, err);
+    loadConfigFor(curKey(a), cfg, err);
     if (!applyProfile(a, cfg, err))
         std::fprintf(stderr, "arc-gpu: profile applied with warnings: %s\n", err.c_str());
     else
@@ -373,11 +376,15 @@ int cmdApply(ArcController& a) {
 int main(int argc, char** argv) {
     std::vector<std::string> args(argv + 1, argv + argc);
 
-    // Global --bdf option may precede the command.
-    std::string bdf;
-    while (!args.empty() && (args[0] == "--bdf" || args[0] == "-b")) {
+    // Global adapter selectors may precede the command. --gpu takes an index
+    // (0,1,...) or a device-id key (e211/e223) and is the reliable multi-GPU
+    // selector; --bdf is kept for compat but IGCL reports 00:00.0 for all cards.
+    std::string bdf, gpuSel;
+    while (!args.empty() && (args[0] == "--bdf" || args[0] == "-b" ||
+                             args[0] == "--gpu" || args[0] == "-g")) {
         if (args.size() < 2) { usage(); return 1; }
-        bdf = args[1];
+        if (args[0] == "--gpu" || args[0] == "-g") gpuSel = args[1];
+        else bdf = args[1];
         args.erase(args.begin(), args.begin() + 2);
     }
     if (args.empty()) { usage(); return 1; }
@@ -391,6 +398,11 @@ int main(int argc, char** argv) {
     std::string err;
     if (!a.init(err)) return fail(err);
     if (!bdf.empty() && !a.selectByBdf(bdf, err)) return fail(err);
+    if (!gpuSel.empty()) {
+        const bool numeric = gpuSel.find_first_not_of("0123456789") == std::string::npos;
+        if (numeric) { if (!a.selectByIndex(static_cast<size_t>(std::stoul(gpuSel)), err)) return fail(err); }
+        else if (!a.selectByKey(gpuSel, err)) return fail(err);
+    }
 
     if (cmd == "list")   return cmdList(a);
     if (cmd == "status") return cmdStatus(a);

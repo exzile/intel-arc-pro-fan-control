@@ -38,6 +38,10 @@ struct AdapterInfo {
     bool isIntel() const { return pciVendorId == kIntelVendorId; }
     // "bus:device.function", e.g. "03:00.0" — matches the Linux ARC_GPU_BDF tail.
     std::string bdfString() const;
+    // Stable, unique-per-model key for per-adapter profiles. BDF is unreliable on
+    // Windows (IGCL reports 00:00.0 for every adapter), so we key on the PCI device
+    // id: "e211" = Arc Pro B60, "e223" = Arc Pro B70.
+    std::string key() const;
 };
 
 struct FanProperties {
@@ -161,6 +165,9 @@ public:
     // first Intel adapter. Callers may override.
     bool selectByIndex(size_t i, std::string& err);
     bool selectByBdf(const std::string& bdf, std::string& err);
+    // Select by AdapterInfo::key() (PCI device id hex, e.g. "e223"). The reliable
+    // multi-GPU selector on Windows since BDF is ambiguous.
+    bool selectByKey(const std::string& key, std::string& err);
 
     // --- Fan ---------------------------------------------------------------
     bool fanProperties(FanProperties& out, std::string& err);
