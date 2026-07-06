@@ -57,11 +57,17 @@ cmake --build build --config Release
 
 ## Desktop dashboard — `arc-gpu-gui`
 
-A native Win32/GDI window (no external toolkit) showing a live 1 s view of
-clocks, card/GPU power, temperature, utilisation, fan and VRAM, with a GPU
-selector and **Fan Auto / Fan Max / Apply** buttons. Run it elevated to allow the
-fan buttons to take effect. The draggable fan-curve editor and OC tab from the
-Linux GUI aren't ported yet — use the `arc-gpu` CLI below for those.
+A native Win32/GDI window (no external toolkit) with two views:
+
+- **Dashboard** — a live 1 s view of clocks, card/GPU power, temperature,
+  utilisation, fan and VRAM, with a GPU selector and **Fan Auto / Fan Max**.
+- **Fan Curve** — a draggable temperature→percent editor: drag nodes,
+  double-click to add a point, right-click a node to remove it, with a live
+  GPU-temperature marker, then **Apply Curve** (persists + hands to the service)
+  or **Reset**.
+
+Run it elevated so fan writes take effect. The VF-curve/overclock editor tab
+isn't ported yet — use `arc-gpu oc` for that.
 
 ## Use (run from an elevated / Administrator prompt)
 
