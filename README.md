@@ -181,6 +181,15 @@ reverse-engineered (DTrace on the live Windows driver → the missing PCODE `0x5
 transaction), every hardware fact learned (VF-curve monotonicity, the Vmax rail, the firmware VR
 lock, what telemetry Linux does/doesn't expose), the dead ends, and the traps.
 
+## Windows
+
+A **Windows port** lives under **[windows/](windows/)**. It provides the same fan curves,
+power/temperature limits, VF-curve overclocking, live telemetry, and a boot service — but built on
+Intel's **Graphics Control Library (IGCL / ControlLib.dll)** instead of the Linux `xe` sysfs + PCODE
+patches, so there's **no kernel driver to sign**. It ships an `arc-gpu` CLI and an `arc-fan-service`
+Windows service. See **[windows/README.md](windows/README.md)** to build/use it and
+**[windows/PORT.md](windows/PORT.md)** for the Linux→Windows capability map and roadmap.
+
 ## Kernel updates
 
 The patched `xe.ko` is replaced by the stock driver on a kernel update. The included
