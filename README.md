@@ -33,7 +33,9 @@ Related upstream issue: [intel/compute-runtime #885](https://github.com/intel/co
 | Idle power/heat optimization | ❌ (idles at 1200 MHz) | ✅ (idles at 400 MHz) |
 | All-sensor temp/health monitor | raw sysfs | ✅ `xe-gpu-temps` (table/watch/json) |
 | Single-command status dashboard | — | ✅ `xe-gpu` (fan+clocks+power+temps) |
-| Native desktop GUI | — | ✅ `xe-gpu-gui` (GTK4: dashboard + fan-curve editor + VF-curve overclock tab) |
+| Native desktop GUI | — | ✅ `xe-gpu-gui` (GTK4: animated metric dashboard, fan-curve editor, VF-curve overclock tab, stability test) |
+| Live VRAM-usage metric | ❌ (debugfs, root-only) | ✅ `xe-gpu-vram.service` → GUI tile |
+| Multiple GPUs | — | ✅ per-card selector; all tabs + writes re-target the chosen card |
 | Survives reboots | — | ✅ systemd |
 | Survives kernel updates | — | ✅ auto-rebuild hook |
 
@@ -128,6 +130,12 @@ xe-gpu-temps json       # machine-readable (for scripts / dashboards)
 - GUI fan curves via the **built-in editor** (`xe-gpu-gui`) — see [docs/GUI.md](docs/GUI.md).
 - GPU tuning details — see [docs/GPU-TUNING.md](docs/GPU-TUNING.md).
 - Persistent config: `/etc/xe-fan-curve.conf`, `/etc/xe-gpu-tune.conf`.
+
+## The full story
+**[docs/NOTES.md](docs/NOTES.md)** — the project journal: how fan control and overclocking were
+reverse-engineered (DTrace on the live Windows driver → the missing PCODE `0x5f/2` begin
+transaction), every hardware fact learned (VF-curve monotonicity, the Vmax rail, the firmware VR
+lock, what telemetry Linux does/doesn't expose), the dead ends, and the traps.
 
 ## Kernel updates
 
