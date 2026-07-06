@@ -157,14 +157,27 @@ This is the same wall we started at for the B60, and the same tool breaks it:
      Solaris17 firmware archive has **only consumer G21** builds (no G31 to diff across versions).
    - Conclusion: the firmware confirms *where* the OC gate lives but the dispatch logic is not
      recoverable to readable form with any public tool. → **#2 (DTrace) is the only tractable route.**
-2. **Definitive: DTrace the B70's Windows driver** while its OC UI applies a change (exactly how the
-   B60 sequence — the missing `0x5f/2` begin — was found). Captures the G31's real
-   opcode/domain/sequence. Needs Windows + the card + DTrace.
-3. Cross-check the captured ops against `xe_pcode_api.h` names and IGCL's `ctlOverclock*` surface.
+2. **DTrace the B70's Windows driver — CLOSED before it started.** The plan was to capture the G31 OC
+   sequence the way the B60's was found (the missing `0x5f/2` begin), then replay it via `oc/pcode_probe`.
+   But the gating check killed it: **the Windows Intel Graphics Software app has a Tuning/OC section for
+   the B60 but *none* for the B70.** So the Windows driver never overclocks the B70 → it never emits a
+   G31 OC sequence → **there is nothing to capture, on any platform.** The Linux `-71` is therefore
+   **by design**: Intel gates OC on the B70/G31 at the firmware+driver level (opcodes firmware-disabled,
+   no OC UI/driver path to enable them) — consistent with the marginal `1062` firmware bump.
 
-The `oc/pcode_probe` debug interface (in the patched module) is the bench for validating whatever
-sequence #2 turns up — it can issue any candidate op safely (single shots; **no** blind enumeration,
-which has wedged the mailbox → GPU hang before).
+## Conclusion
+
+**B70/G31 overclocking is not achievable today** — not a Linux/`xe` gap, but Intel gating OC on the
+card everywhere (Windows included). Both routes are exhausted: firmware extraction (opcodes locked in
+signed/compressed/undocumented `PCODE_0`) and DTrace (no reference sequence exists to observe). What
+*does* work is everything the control panel actually needs — **fan control, power cap, clock limits,
+and full telemetry** — all validated and multi-GPU-isolated.
+
+If Intel later ships B70 OC (it's a Q1.26-new card), the door reopens with **zero rework**: re-check
+the app for a B70 tuning section; if it appears, DTrace `fbt:igdkmdnd64:*004c5310:entry` while tuning
+(struct `+0`=op `+4`=p1 `+8`=p2 `+0xc`=d0 `+0x10`=d1 `+0x14/0x18`=out `+0x1c`=status) and replay via
+`oc/pcode_probe` — which is already built into the running B70 `xe.ko`. Single shots only; **no** blind
+opcode enumeration (it has wedged the mailbox → GPU hang before).
 
 ---
 
