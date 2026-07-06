@@ -245,15 +245,14 @@ bool ArcController::fanSetCurve(const std::vector<FanPoint>& pts, std::string& e
 }
 
 bool ArcController::fanSetFixed(int percent, std::string& err) {
-    if (!ensureFanHandle(err)) return false;
+    // These cards don't support FIXED fan mode (ctlFanSetFixedSpeedMode returns
+    // CTL_RESULT_ERROR_UNSUPPORTED_FEATURE) — only the speed TABLE works. Emulate
+    // a constant speed with a flat curve (same percent at every temperature).
     percent = std::max(0, std::min(100, percent));
-    ctl_fan_speed_t s;
-    zeroInit(s);
-    s.speed = percent;
-    s.units = CTL_FAN_SPEED_UNITS_PERCENT;
-    ctl_result_t r = lib_.ctlFanSetFixedSpeedMode(fan_, &s);
-    if (r != CTL_RESULT_SUCCESS) { err = "ctlFanSetFixedSpeedMode failed (" + ctlErr(r) + ")."; return false; }
-    return true;
+    std::vector<FanPoint> flat = {
+        {0,   percent}, {40, percent}, {70, percent}, {100, percent},
+    };
+    return fanSetCurve(flat, err);
 }
 
 bool ArcController::fanSetAuto(std::string& err) {

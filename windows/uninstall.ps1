@@ -49,6 +49,20 @@ if ($machinePath -like "*$InstallDir*") {
     [Environment]::SetEnvironmentVariable('Path', $new, 'Machine')
 }
 
+# Re-enable the Intel Graphics Software services that install.ps1 disabled.
+$IntelOwnerServices = @('IntelGraphicsSoftwareService', 'IGSDSserviceDiscrete')
+foreach ($svc in $IntelOwnerServices) {
+    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if (-not $s) { continue }
+    try {
+        Set-Service -Name $svc -StartupType Automatic -ErrorAction Stop
+        Start-Service -Name $svc -ErrorAction SilentlyContinue
+        Write-Host "Re-enabled '$($s.DisplayName)' ($svc)."
+    } catch {
+        Write-Warning "Could not re-enable ${svc}: $_"
+    }
+}
+
 $DataDir = Join-Path $env:ProgramData 'ArcFanControl'
 if ($PurgeConfig -and (Test-Path $DataDir)) {
     Write-Host "Removing config $DataDir ..."
