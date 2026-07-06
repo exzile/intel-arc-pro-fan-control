@@ -257,10 +257,21 @@ bool ArcController::fanSetFixed(int percent, std::string& err) {
 }
 
 bool ArcController::fanSetAuto(std::string& err) {
-    if (!ensureFanHandle(err)) return false;
-    ctl_result_t r = lib_.ctlFanSetDefaultMode(fan_);
-    if (r != CTL_RESULT_SUCCESS) { err = "ctlFanSetDefaultMode failed (" + ctlErr(r) + ")."; return false; }
-    return true;
+    // Do NOT use ctlFanSetDefaultMode. It relinquishes our software ownership of
+    // the fan, and the public IGCL fan API cannot re-acquire control afterward in
+    // the same driver session: ctlFanSetSpeedTableMode then returns SUCCESS but
+    // silently no-ops (the driver keeps the hardware/stock curve) until a full
+    // driver reset. Intel's own app avoids this by driving the fan via the private
+    // DXGK escape 0x80c rather than the public ownership state machine.
+    //
+    // Instead, emulate "auto" with Intel's stock temperature curve applied via
+    // table mode. This gives the same near-silent-at-idle behaviour while KEEPING
+    // us in control, so subsequent curve changes still take effect without a reset.
+    static const std::vector<FanPoint> kStockCurve = {
+        {59, 0}, {60, 20}, {65, 30}, {70, 40}, {75, 60},
+        {79, 80}, {84, 100}, {90, 100}, {94, 100}, {95, 100},
+    };
+    return fanSetCurve(kStockCurve, err);
 }
 
 bool ArcController::fanGetRpm(int& rpm, std::string& err) {

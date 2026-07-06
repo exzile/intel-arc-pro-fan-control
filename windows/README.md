@@ -127,12 +127,24 @@ Its log is `%ProgramData%\ArcFanControl\service.log`.
 - **Units differ from Linux.** The Linux CLI uses PWM `0-255`; IGCL fan tables
   use **percent (0-100)**, so this port speaks percent. `fan_curve.hpp` has a
   `pwmToPercent()` helper if you're porting an old curve.
-- **Overclocking needs the Intel Graphics Software service running.** It is the
-  precondition for the IGCL overclock waiver — with the service stopped/disabled,
-  every OC write returns `UNSUPPORTED_FEATURE (0x4000000a)`. `install.ps1` keeps
-  it enabled by default. The service does **not** contend fan control (fan and OC
-  both work while it runs). Pass `-DisableIntelService` only for fan-only setups
-  that don't need OC.
+- **Fan vs overclock is a hardware tradeoff — pick one.** The Intel Graphics
+  Software service is the precondition for the IGCL overclock waiver (with it
+  disabled, every OC write returns `UNSUPPORTED_FEATURE (0x4000000a)`). But that
+  same service also actively owns the GPU fan, so when it and our fan service both
+  run they fight over ownership — `canControl` flips to `no` and our curve gets
+  reverted to Intel's stock table.
+  - **Default = fan-priority:** `install.ps1` **disables** the Intel service so
+    our fan curve applies reliably at boot. To overclock, run an *OC session*:
+    `windows\oc-session.ps1 -Oc 'freq 100','temp 95'` briefly re-enables the
+    service, applies the OC (which persists in hardware until the next reboot),
+    then disables it again so the fan curve keeps ownership.
+  - **OC-priority:** install with `-EnableOverclock` to leave the Intel service
+    running — OC works and persists, but Intel manages the fan (our custom curve
+    won't hold).
+  - `ctlFanSetDefaultMode` ("true" hardware auto) is deliberately **not** used:
+    it permanently relinquishes fan ownership for the driver session and the
+    public IGCL API cannot re-take it without a driver reset. `fan auto` instead
+    applies Intel's stock *curve* via table mode, keeping us in control.
 - **Overclock warranty waiver.** IGCL requires accepting a warranty waiver
   before voltage / VF-curve writes; the tool sets it for you on those commands.
   Overclocking can reduce the part's lifetime — use at your own risk.

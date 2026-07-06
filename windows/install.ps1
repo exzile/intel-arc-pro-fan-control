@@ -11,27 +11,32 @@
 #   -BuildDir <path>       where the .exe files are (default: build\Release)
 #   -NoService             copy binaries but don't register the service
 #   -AddToPath             add the install dir to the system PATH
-#   -DisableIntelService   fan-only: disable Intel's Graphics Software service
+#   -EnableOverclock       OC-priority: leave Intel's service ENABLED (see below)
 #
-# The Intel Graphics Software service is REQUIRED for overclocking: it is the
-# precondition for ctlOverclockWaiverSet (without it running, every OC write
-# returns UNSUPPORTED_FEATURE 0x4000000a). It does NOT block our fan control -
-# fan and OC both work while it runs (verified: fan reaches full RPM + OC freq
-# offset applies with the service up). So by default we KEEP it enabled.
+# FAN vs OVERCLOCK - a hardware tradeoff you must pick:
+#   The Intel Graphics Software service is REQUIRED for overclocking (it is the
+#   precondition for ctlOverclockWaiverSet; without it every OC write returns
+#   UNSUPPORTED_FEATURE 0x4000000a). BUT that same service also actively owns the
+#   GPU fan, and it CONTENDS our fan service - with both running they fight over
+#   fan ownership (canControl flips to no, our curve gets reverted to Intel stock).
 #
-# Pass -DisableIntelService only if you want fan control with zero possibility of
-# the Intel Arc app contending the fan curve, and you don't need overclocking.
-# Doing so DISABLES overclocking (the waiver can no longer be set).
+#   DEFAULT = FAN-PRIORITY: this installer DISABLES the Intel service so our fan
+#   curve applies reliably at boot. Overclocking is then unavailable until you run
+#   an "OC session" (windows\oc-session.ps1) which briefly re-enables the service,
+#   applies the OC, and it persists in hardware until the next reboot.
+#
+#   -EnableOverclock = OC-PRIORITY: leaves the Intel service enabled so OC works
+#   and persists, but our custom fan curve will NOT hold (Intel manages the fan).
 [CmdletBinding()]
 param(
     [string]$BuildDir = (Join-Path $PSScriptRoot 'build\Release'),
     [switch]$NoService,
     [switch]$AddToPath,
-    [switch]$DisableIntelService
+    [switch]$EnableOverclock
 )
 
-# The Intel service is the overclock-waiver precondition; keep it running unless
-# the user explicitly opts into fan-only (-DisableIntelService).
+# Intel's service owns the fan AND gates overclocking. Disabled by default so our
+# fan curve wins; -EnableOverclock keeps it for OC at the cost of fan ownership.
 $IntelOwnerServices = @('IntelGraphicsSoftwareService', 'IGSDSserviceDiscrete')
 
 $ErrorActionPreference = 'Stop'
@@ -103,10 +108,24 @@ try {
     Write-Warning "Could not register tray auto-start: $_"
 }
 
-if (-not $DisableIntelService) {
-    # Keep the Intel service ENABLED + running: it is the overclock-waiver
-    # precondition (OC writes return UNSUPPORTED_FEATURE without it). Our fan
-    # control coexists with it, so there is no reason to disable it by default.
+if (-not $EnableOverclock) {
+    # FAN-PRIORITY (default): disable the Intel service so it stops contending our
+    # fan curve. This also disables overclocking until an OC session re-enables it
+    # (windows\oc-session.ps1). Our boot service then owns the fan cleanly.
+    foreach ($svc in $IntelOwnerServices) {
+        $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+        if (-not $s) { continue }
+        try {
+            if ($s.Status -ne 'Stopped') { Stop-Service -Name $svc -Force -ErrorAction Stop }
+            Set-Service -Name $svc -StartupType Disabled -ErrorAction Stop
+            Write-Host "Disabled '$($s.DisplayName)' ($svc) - fan-priority; run oc-session.ps1 to overclock."
+        } catch {
+            Write-Warning "Could not disable ${svc}: $_"
+        }
+    }
+} else {
+    # OC-PRIORITY: leave the Intel service enabled (OC works + persists), at the
+    # cost of a reliable custom fan curve (Intel manages the fan while it runs).
     foreach ($svc in $IntelOwnerServices) {
         $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
         if (-not $s) { continue }
@@ -114,25 +133,12 @@ if (-not $DisableIntelService) {
             $startType = if ($svc -eq 'IntelGraphicsSoftwareService') { 'Automatic' } else { 'Manual' }
             Set-Service -Name $svc -StartupType $startType -ErrorAction Stop
             if ($s.Status -ne 'Running') { Start-Service -Name $svc -ErrorAction SilentlyContinue }
-            Write-Host "Ensured '$($s.DisplayName)' ($svc) is enabled - required for overclocking."
+            Write-Host "Left '$($s.DisplayName)' ($svc) enabled - OC available; custom fan curve may not hold."
         } catch {
             Write-Warning "Could not enable ${svc}: $_"
         }
     }
-} else {
-    # Fan-only: disable the Intel service. This DISABLES overclocking.
-    foreach ($svc in $IntelOwnerServices) {
-        $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
-        if (-not $s) { continue }
-        try {
-            if ($s.Status -ne 'Stopped') { Stop-Service -Name $svc -Force -ErrorAction Stop }
-            Set-Service -Name $svc -StartupType Disabled -ErrorAction Stop
-            Write-Host "Disabled '$($s.DisplayName)' ($svc) - fan-only mode, overclocking unavailable."
-        } catch {
-            Write-Warning "Could not disable ${svc}: $_"
-        }
-    }
-    Write-Warning 'Overclocking is DISABLED (-DisableIntelService). Re-run install.ps1 without that switch to restore OC.'
+    Write-Warning 'OC-priority mode: the Intel service will contend the fan; our custom curve may be reverted to Intel stock.'
 }
 
 if (-not $NoService) {
