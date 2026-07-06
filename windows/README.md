@@ -76,6 +76,11 @@ arc-gpu oc mem 20                  # VRAM memory-speed limit (IGCL units)
 arc-gpu oc temp 95                 # GPU thermal-throttle target
 arc-gpu oc vfcurve 820:1200 900:1800 1035:2400   # custom VF curve (waiver)
 arc-gpu oc reset                   # back to stock
+arc-gpu oc profile save daily      # save current OC as a named profile
+arc-gpu oc profile load daily      # re-apply it (also: list / delete)
+
+# temperatures (per sensor: GPU / VRAM / global)
+arc-gpu temps
 
 # multi-GPU: target a specific card by BDF (or set ARC_GPU_BDF)
 arc-gpu --bdf 03:00.0 fan set 50:40 70:80 85:100

@@ -49,4 +49,18 @@ bool loadConfig(AppConfig& out, std::string& err);
 // Persist config (creates the directory as needed).
 bool saveConfig(const AppConfig& cfg, std::string& err);
 
+// --- Named overclock profiles (mirrors `xe-gpu-oc profile save/load/list`) ---
+// Stored as individual INI files under configDir()\profiles\<name>.ini.
+
+// configDir() + "\profiles".
+std::string profilesDir();
+// profilesDir() + "\<name>.ini".
+std::string profilePath(const std::string& name);
+// Names (without extension) of all saved profiles.
+std::vector<std::string> listProfiles();
+// Save/load/delete a named profile. loadNamedProfile fails if it doesn't exist.
+bool saveNamedProfile(const std::string& name, const AppConfig& cfg, std::string& err);
+bool loadNamedProfile(const std::string& name, AppConfig& out, std::string& err);
+bool deleteProfile(const std::string& name, std::string& err);
+
 } // namespace arc

@@ -38,8 +38,8 @@ The alternatives considered and why IGCL won:
 | Boot persistence | systemd `*.service` | `arc-fan-service` (SCM) | ✅ |
 | Multi-GPU targeting | `ARC_GPU_BDF` | `--bdf` / `ARC_GPU_BDF` | ✅ |
 | Native GUI | GTK4 `xe-gpu-gui` | — | ⬜ not yet |
-| Per-sensor temp table | `xe-gpu-temps` (12 VRAM channels) | `ctlEnumTemperatureSensors` (loader ready) | ⬜ partial (telemetry temps only) |
-| Named OC profiles | `xe-gpu-oc profile save/load` | single INI profile | ⬜ single profile only |
+| Per-sensor temp table | `xe-gpu-temps` (12 VRAM channels) | `ctlEnumTemperatureSensors` → `arc-gpu temps` | ✅ (IGCL exposes GPU/VRAM/global, not 12 VRAM channels) |
+| Named OC profiles | `xe-gpu-oc profile save/load` | `arc-gpu oc profile save/load/list/delete` | ✅ |
 | Stability test | `xe-gpu-stress` | — | ⬜ not yet |
 | VRAM used/total | root debugfs → `xe-gpu-vramd` | IGCL memory props | ⬜ not yet |
 
@@ -57,10 +57,8 @@ The alternatives considered and why IGCL won:
 
 ## Roadmap (next)
 
-1. **Per-sensor temperature table** — wire `ctlEnumTemperatureSensors` /
-   `ctlTemperatureGetState` into `arc-gpu temps` (loader entries already added).
-2. **Named OC profiles** — extend the config to multiple named profiles
-   (`arc-gpu oc profile save/load/list`), matching the Linux CLI.
+1. ~~Per-sensor temperature table~~ — **done** (`arc-gpu temps`).
+2. ~~Named OC profiles~~ — **done** (`arc-gpu oc profile save/load/list/delete`).
 3. **VRAM used/total + memory props** — surface from IGCL for the dashboard.
 4. **Native GUI** — a WinUI 3 / Win32 dashboard + fan-curve + OC editor over
    `arc_core` (the CLI and service already share that library).

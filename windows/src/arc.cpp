@@ -376,6 +376,51 @@ Metrics ArcController::deriveMetrics(const Telemetry& a, const Telemetry& b) {
     return m;
 }
 
+namespace {
+const char* tempSensorLabel(ctl_temp_sensors_t t) {
+    switch (t) {
+        case CTL_TEMP_SENSORS_GLOBAL:     return "global";
+        case CTL_TEMP_SENSORS_GPU:        return "gpu";
+        case CTL_TEMP_SENSORS_MEMORY:     return "vram";
+        case CTL_TEMP_SENSORS_GLOBAL_MIN: return "global_min";
+        case CTL_TEMP_SENSORS_GPU_MIN:    return "gpu_min";
+        case CTL_TEMP_SENSORS_MEMORY_MIN: return "vram_min";
+        default:                          return "sensor";
+    }
+}
+} // namespace
+
+bool ArcController::readTemperatures(std::vector<TempSensor>& out, std::string& err) {
+    ctl_device_adapter_handle_t h = handle();
+    if (!h) { err = "no adapter selected"; return false; }
+    ARC_REQUIRE_FN(ctlEnumTemperatureSensors);
+    ARC_REQUIRE_FN(ctlTemperatureGetProperties);
+    ARC_REQUIRE_FN(ctlTemperatureGetState);
+
+    uint32_t count = 0;
+    ctl_result_t r = lib_.ctlEnumTemperatureSensors(h, &count, nullptr);
+    if (r != CTL_RESULT_SUCCESS || count == 0) { err = "no temperature sensors (" + ctlErr(r) + ")."; return false; }
+    std::vector<ctl_temp_handle_t> handles(count, nullptr);
+    r = lib_.ctlEnumTemperatureSensors(h, &count, handles.data());
+    if (r != CTL_RESULT_SUCCESS) { err = "ctlEnumTemperatureSensors failed (" + ctlErr(r) + ")."; return false; }
+
+    out.clear();
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!handles[i]) continue;
+        ctl_temp_properties_t props;
+        zeroInit(props);
+        if (lib_.ctlTemperatureGetProperties(handles[i], &props) != CTL_RESULT_SUCCESS) continue;
+        TempSensor s;
+        s.label = tempSensorLabel(props.type);
+        s.maxC = props.maxTemperature;
+        double cur = -1.0;
+        if (lib_.ctlTemperatureGetState(handles[i], &cur) == CTL_RESULT_SUCCESS) s.currentC = cur;
+        else s.currentC = -1.0;
+        out.push_back(s);
+    }
+    return true;
+}
+
 bool ArcController::ocGetState(OcState& out, std::string& err) {
     ctl_device_adapter_handle_t h = handle();
     if (!h) { err = "no adapter selected"; return false; }

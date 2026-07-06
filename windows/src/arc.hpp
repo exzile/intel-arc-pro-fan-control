@@ -62,6 +62,13 @@ struct VFPoint {
     uint32_t freqMHz = 0;
 };
 
+// One temperature sensor reading.
+struct TempSensor {
+    std::string label;     // "gpu" / "vram" / "global" / ...
+    double currentC = 0;   // -1 if unreadable
+    double maxC = 0;       // hardware max for this sensor (0 if unknown)
+};
+
 // A raw telemetry snapshot. Rate metrics (power, utilization, bandwidth) are
 // counters here; call deriveMetrics() on two snapshots to get instantaneous
 // values, exactly as the Linux tools do with energy*_input.
@@ -157,6 +164,10 @@ public:
     // --- Telemetry ---------------------------------------------------------
     bool sampleTelemetry(Telemetry& out, std::string& err);
     static Metrics deriveMetrics(const Telemetry& a, const Telemetry& b);
+
+    // Per-sensor temperatures (GPU / VRAM / global + min variants). Requires the
+    // ControlLib temperature exports; returns false if they're absent.
+    bool readTemperatures(std::vector<TempSensor>& out, std::string& err);
 
     // --- Overclock / tuning ------------------------------------------------
     bool ocGetState(OcState& out, std::string& err);

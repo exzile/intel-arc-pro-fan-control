@@ -58,11 +58,9 @@ bool ensureConfigDir(std::string& err) {
     return false;
 }
 
-bool loadConfig(AppConfig& out, std::string& err) {
-    out = AppConfig{};
-    std::ifstream f(configPath());
-    if (!f.is_open()) return true;   // no file yet => defaults
+namespace {
 
+void parseInto(std::istream& f, AppConfig& out) {
     std::string line, section;
     while (std::getline(f, line)) {
         line = trim(line);
@@ -94,12 +92,9 @@ bool loadConfig(AppConfig& out, std::string& err) {
             if (key == "bdf") out.bdf = val;
         }
     }
-    return true;
 }
 
-bool saveConfig(const AppConfig& cfg, std::string& err) {
-    if (!ensureConfigDir(err)) return false;
-
+std::string serialize(const AppConfig& cfg) {
     std::ostringstream o;
     o << "# Arc Fan Control profile — re-applied at boot by the ArcFanControl service.\n";
     o << "# Managed by arc-gpu; hand-edits are preserved on the next save.\n\n";
@@ -119,14 +114,87 @@ bool saveConfig(const AppConfig& cfg, std::string& err) {
     if (cfg.hasMemSpeed)   o << "mem_speed = "   << cfg.memSpeed   << "\n";
     if (cfg.hasPowerW)     o << "power_w = "     << cfg.powerW     << "\n";
     if (cfg.hasTempC)      o << "temp_c = "      << cfg.tempC      << "\n";
+    return o.str();
+}
 
-    std::ofstream f(configPath(), std::ios::trunc);
-    if (!f.is_open()) {
-        err = "cannot write config file '" + configPath() + "'";
+bool writeFile(const std::string& path, const std::string& body, std::string& err) {
+    std::ofstream f(path, std::ios::trunc);
+    if (!f.is_open()) { err = "cannot write file '" + path + "'"; return false; }
+    f << body;
+    if (!f.good()) { err = "write error on '" + path + "'"; return false; }
+    return true;
+}
+
+} // namespace
+
+bool loadConfig(AppConfig& out, std::string& err) {
+    out = AppConfig{};
+    std::ifstream f(configPath());
+    if (!f.is_open()) return true;   // no file yet => defaults
+    parseInto(f, out);
+    return true;
+}
+
+bool saveConfig(const AppConfig& cfg, std::string& err) {
+    if (!ensureConfigDir(err)) return false;
+    return writeFile(configPath(), serialize(cfg), err);
+}
+
+std::string profilesDir() {
+    return configDir() + "\\profiles";
+}
+
+std::string profilePath(const std::string& name) {
+    return profilesDir() + "\\" + name + ".ini";
+}
+
+std::vector<std::string> listProfiles() {
+    std::vector<std::string> names;
+    WIN32_FIND_DATAA fd{};
+    const std::string glob = profilesDir() + "\\*.ini";
+    HANDLE h = ::FindFirstFileA(glob.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return names;
+    do {
+        std::string n = fd.cFileName;
+        const size_t dot = n.rfind(".ini");
+        if (dot != std::string::npos) n = n.substr(0, dot);
+        if (!n.empty()) names.push_back(n);
+    } while (::FindNextFileA(h, &fd));
+    ::FindClose(h);
+    return names;
+}
+
+bool saveNamedProfile(const std::string& name, const AppConfig& cfg, std::string& err) {
+    if (name.empty() || name.find_first_of("\\/:*?\"<>|") != std::string::npos) {
+        err = "invalid profile name '" + name + "'";
         return false;
     }
-    f << o.str();
-    return f.good();
+    const std::string dir = profilesDir();
+    if (!::CreateDirectoryA(configDir().c_str(), nullptr) &&
+        ::GetLastError() != ERROR_ALREADY_EXISTS) {
+        err = "cannot create config directory '" + configDir() + "'";
+        return false;
+    }
+    if (!::CreateDirectoryA(dir.c_str(), nullptr) &&
+        ::GetLastError() != ERROR_ALREADY_EXISTS) {
+        err = "cannot create profiles directory '" + dir + "'";
+        return false;
+    }
+    return writeFile(profilePath(name), serialize(cfg), err);
+}
+
+bool loadNamedProfile(const std::string& name, AppConfig& out, std::string& err) {
+    out = AppConfig{};
+    std::ifstream f(profilePath(name));
+    if (!f.is_open()) { err = "profile '" + name + "' not found"; return false; }
+    parseInto(f, out);
+    return true;
+}
+
+bool deleteProfile(const std::string& name, std::string& err) {
+    if (::DeleteFileA(profilePath(name).c_str())) return true;
+    err = "cannot delete profile '" + name + "'";
+    return false;
 }
 
 } // namespace arc

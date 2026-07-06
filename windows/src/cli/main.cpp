@@ -19,6 +19,8 @@
 //   oc temp C                    GPU temperature (throttle) limit
 //   oc vfcurve V:F V:F ...       write a custom VF curve (sets warranty waiver)
 //   oc reset                     reset all overclock knobs to stock
+//   oc profile save|load|list|delete [name]   named overclock profiles
+//   temps                        per-sensor temperatures (GPU/VRAM/global)
 //   apply                        re-apply the saved profile (used by the service)
 //
 // Writes and profile saves need Administrator + a supported Intel Arc driver.
@@ -55,6 +57,8 @@ void usage() {
         "  oc temp C                  GPU temperature limit\n"
         "  oc vfcurve V:F V:F ...      write a custom VF curve (warranty waiver)\n"
         "  oc reset                   reset overclock to stock\n"
+        "  oc profile save|load|list|delete [name]   named OC profiles\n"
+        "  temps                      per-sensor temperatures\n"
         "  apply                      re-apply the saved profile\n");
 }
 
@@ -206,10 +210,83 @@ int cmdTune(ArcController& a, const std::vector<std::string>& args) {
     return fail("unknown tune subcommand '" + args[0] + "'");
 }
 
+int cmdTemps(ArcController& a) {
+    std::vector<TempSensor> ts;
+    std::string err;
+    if (!a.readTemperatures(ts, err)) return fail(err);
+    if (ts.empty()) { std::printf("No temperature sensors reported.\n"); return 0; }
+    for (const TempSensor& s : ts) {
+        if (s.currentC < 0)
+            std::printf("  %-12s     --    (max %.0f C)\n", s.label.c_str(), s.maxC);
+        else
+            std::printf("  %-12s %6.1f C  (max %.0f C)\n", s.label.c_str(), s.currentC, s.maxC);
+    }
+    return 0;
+}
+
+// `arc-gpu oc profile <save|load|list|delete> [name]`
+int cmdOcProfile(ArcController& a, const std::vector<std::string>& args) {
+    std::string err;
+    const std::string action = args.empty() ? "list" : args[0];
+    const std::string name = args.size() > 1 ? args[1] : "";
+
+    if (action == "list") {
+        std::vector<std::string> names = listProfiles();
+        if (names.empty()) { std::printf("No saved profiles.\n"); return 0; }
+        for (const std::string& n : names) std::printf("  %s\n", n.c_str());
+        return 0;
+    }
+    if (name.empty()) return fail("oc profile " + action + " needs a name");
+
+    if (action == "save") {
+        OcState s;
+        if (!a.ocGetState(s, err)) return fail(err);
+        AppConfig cfg;
+        cfg.ocApply = true;
+        if (const AdapterInfo* d = a.current()) cfg.bdf = d->bdfString();
+        cfg.hasFreqOffset = s.hasGpuFreqOffset; cfg.freqOffset = s.gpuFreqOffset;
+        cfg.hasVoltOffset = s.hasGpuVoltOffset; cfg.voltOffset = s.gpuVoltOffset;
+        cfg.hasMemSpeed   = s.hasMemSpeed;      cfg.memSpeed   = s.memSpeed;
+        cfg.hasPowerW     = s.hasPowerLimit;    cfg.powerW     = s.powerLimitW;
+        cfg.hasTempC      = s.hasTempLimit;     cfg.tempC      = s.tempLimitC;
+        if (!saveNamedProfile(name, cfg, err)) return fail(err);
+        std::printf("Saved profile '%s'.\n", name.c_str());
+        return 0;
+    }
+    if (action == "load") {
+        AppConfig named;
+        if (!loadNamedProfile(name, named, err)) return fail(err);
+        std::string ae;
+        if (!applyProfile(a, named, ae))
+            std::fprintf(stderr, "arc-gpu: profile applied with warnings: %s\n", ae.c_str());
+        // Merge the OC subset into the active profile so the service re-applies it.
+        AppConfig active;
+        loadConfig(active, err);
+        active.ocApply = named.ocApply;
+        active.hasFreqOffset = named.hasFreqOffset; active.freqOffset = named.freqOffset;
+        active.hasVoltOffset = named.hasVoltOffset; active.voltOffset = named.voltOffset;
+        active.hasMemSpeed   = named.hasMemSpeed;   active.memSpeed   = named.memSpeed;
+        active.hasPowerW     = named.hasPowerW;     active.powerW     = named.powerW;
+        active.hasTempC      = named.hasTempC;      active.tempC      = named.tempC;
+        saveConfig(active, err);
+        std::printf("Loaded profile '%s'.\n", name.c_str());
+        return 0;
+    }
+    if (action == "delete") {
+        if (!deleteProfile(name, err)) return fail(err);
+        std::printf("Deleted profile '%s'.\n", name.c_str());
+        return 0;
+    }
+    return fail("unknown oc profile action '" + action + "'");
+}
+
 int cmdOc(ArcController& a, const std::vector<std::string>& args) {
     if (args.empty()) { usage(); return 1; }
     const std::string& sub = args[0];
     std::string err;
+
+    if (sub == "profile")
+        return cmdOcProfile(a, std::vector<std::string>(args.begin() + 1, args.end()));
 
     if (sub == "read") {
         const bool live = !(args.size() > 1 && args[1] == "stock");
@@ -312,6 +389,7 @@ int main(int argc, char** argv) {
     if (cmd == "fan")    return cmdFan(a, rest);
     if (cmd == "tune")   return cmdTune(a, rest);
     if (cmd == "oc")     return cmdOc(a, rest);
+    if (cmd == "temps")  return cmdTemps(a);
     if (cmd == "apply")  return cmdApply(a);
 
     usage();
