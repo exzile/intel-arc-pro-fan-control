@@ -1,0 +1,10 @@
+# Build output
+build/
+out/
+*.obj
+*.exe
+*.pdb
+*.ilk
+
+# IGCL header is fetched locally, not committed (see third_party/igcl/README.md)
+third_party/igcl/igcl_api.h
