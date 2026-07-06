@@ -11,6 +11,10 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 ```
 Launch **Arc GPU Dashboard** from your apps menu, or run `xe-gpu-gui`.
 
+**Multiple GPUs:** if more than one Intel Arc (xe) card is present, a **GPU selector** appears in the
+header — pick which card to monitor and control, and every tab (dashboard / fan / overclock) plus all
+writes re-target that card (via `ARC_GPU_BDF`). With a single GPU the selector is hidden.
+
 ## Dashboard tab
 Live (2 s) monitoring. A **Specifications** row spans the top — the fixed limits & configuration,
 *not* live metrics: device, power cap, power limit (I1), clock limits, hardware clock range, power

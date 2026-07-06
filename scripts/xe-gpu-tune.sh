@@ -8,19 +8,25 @@
 #   sudo xe-gpu-tune boot                  # apply /etc/xe-gpu-tune.conf (used by systemd)
 set -uo pipefail
 
-# --- find the xe GPU's sysfs (don't hardcode cardN/hwmonN) ---
+# --- find the xe GPU's sysfs (honour ARC_GPU_BDF for multi-GPU) ---
 CARD=""
 for c in /sys/class/drm/card*; do
   [ -e "$c/device/driver" ] || continue
-  if [ "$(basename "$(readlink -f "$c/device/driver")")" = "xe" ]; then CARD="$c"; break; fi
+  [ "$(basename "$(readlink -f "$c/device/driver")")" = "xe" ] || continue
+  if [ -n "${ARC_GPU_BDF:-}" ]; then
+    [ "$(basename "$(readlink -f "$c/device")")" = "$ARC_GPU_BDF" ] || continue
+  fi
+  CARD="$c"; break
 done
 [ -n "$CARD" ] || { echo "error: no xe GPU found"; exit 1; }
 GT="$CARD/device/tile0/gt0/freq0"
 [ -d "$GT" ] || { echo "error: no freq controls at $GT"; exit 1; }
-# matching hwmon (name=xe)
+# matching hwmon (same BDF as CARD)
+CBDF=$(basename "$(readlink -f "$CARD/device")")
 HW=""
 for d in /sys/class/hwmon/hwmon*; do
-  [ -r "$d/name" ] && [ "$(cat "$d/name")" = "xe" ] && { HW="$d"; break; }
+  [ -r "$d/name" ] && [ "$(cat "$d/name")" = "xe" ] || continue
+  [ "$(basename "$(readlink -f "$d/device" 2>/dev/null)" 2>/dev/null)" = "$CBDF" ] && { HW="$d"; break; }
 done
 
 rd() { cat "$1" 2>/dev/null; }

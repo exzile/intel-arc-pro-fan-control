@@ -18,11 +18,16 @@
 
 set -euo pipefail
 
-# --- locate the xe hwmon directory by name (don't hardcode hwmonN) ---
+# --- locate the xe hwmon directory by name (honour ARC_GPU_BDF for multi-GPU) ---
 HWMON=""
 for d in /sys/class/hwmon/hwmon*; do
   [ -r "$d/name" ] || continue
-  if [ "$(cat "$d/name")" = "xe" ]; then HWMON="$d"; break; fi
+  [ "$(cat "$d/name")" = "xe" ] || continue
+  if [ -n "${ARC_GPU_BDF:-}" ]; then
+    hbdf=$(basename "$(readlink -f "$d/device" 2>/dev/null)" 2>/dev/null)
+    [ "$hbdf" = "$ARC_GPU_BDF" ] || continue
+  fi
+  HWMON="$d"; break
 done
 [ -n "$HWMON" ] || { echo "error: no xe hwmon device found (is the patched xe module loaded?)"; exit 1; }
 [ -e "$HWMON/pwm1_enable" ] || { echo "error: $HWMON has no pwm1_enable (fan-control patch not active)"; exit 1; }

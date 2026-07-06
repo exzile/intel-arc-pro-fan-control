@@ -94,16 +94,43 @@ def _int(p):
         return None
 
 
+def _card_bdf(card):
+    return os.path.basename(os.path.realpath(os.path.join(card, "device"))) if card else None
+
+
+def list_xe_gpus():
+    """All Intel Arc (xe) GPUs on the box, sorted by PCI address. Each: card path, BDF,
+    device id, and a short label."""
+    out = []
+    for c in sorted(glob.glob("/sys/class/drm/card*")):
+        drv = os.path.join(c, "device", "driver")
+        if os.path.islink(drv) and os.path.basename(os.path.realpath(drv)) == "xe":
+            bdf = _card_bdf(c)
+            did = (_read(os.path.join(c, "device", "device")) or "").replace("0x", "")
+            out.append({"card": c, "bdf": bdf, "id": "8086:" + did,
+                        "label": f"{os.path.basename(c)} · {bdf}"})
+    return sorted(out, key=lambda g: g["bdf"] or "")
+
+
 class XeGpu:
-    def __init__(self):
-        self.card = self.hwmon = None
-        for c in sorted(glob.glob("/sys/class/drm/card*")):
-            drv = os.path.join(c, "device", "driver")
-            if os.path.islink(drv) and os.path.basename(os.path.realpath(drv)) == "xe":
-                self.card = c
-                break
+    def __init__(self, card=None):
+        # a specific drm card, or the first xe card found
+        self.card = card
+        if self.card is None:
+            for c in sorted(glob.glob("/sys/class/drm/card*")):
+                drv = os.path.join(c, "device", "driver")
+                if os.path.islink(drv) and os.path.basename(os.path.realpath(drv)) == "xe":
+                    self.card = c
+                    break
+        self.bdf = _card_bdf(self.card)
+        # pair the hwmon that belongs to THIS card (by BDF), not just the first xe hwmon
+        self.hwmon = None
         for d in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
-            if _read(os.path.join(d, "name")) == "xe":
+            if _read(os.path.join(d, "name")) != "xe":
+                continue
+            hbdf = os.path.basename(os.path.realpath(os.path.join(d, "device"))) \
+                if os.path.exists(os.path.join(d, "device")) else None
+            if self.bdf is None or hbdf == self.bdf:
                 self.hwmon = d
                 break
 
@@ -141,8 +168,11 @@ class XeGpu:
         return _int(os.path.join(self.hwmon, "energy2_input")) if self.hwmon else None
 
     def vram(self):
-        # VRAM used/total bytes, exported by xe-gpu-vram.service (from root-only debugfs)
-        raw = _read("/run/xe-gpu-vram")
+        # VRAM used/total bytes, exported by xe-gpu-vram.service (from root-only debugfs).
+        # Per-card file first (multi-GPU), then the default single-card file.
+        raw = _read(f"/run/xe-gpu-vram-{self.bdf}") if self.bdf else None
+        if not raw:
+            raw = _read("/run/xe-gpu-vram")
         if not raw:
             return None
         p = raw.split()
@@ -696,8 +726,14 @@ HELPER_PATHS = {"xe-fan-curve": "/usr/local/bin/xe-fan-curve",
 def run_priv(args, parent, after=None):
     # pkexec sanitizes PATH (often no /usr/local/bin) -> use absolute paths.
     args = [HELPER_PATHS.get(args[0], args[0])] + list(args[1:])
+    cmd = ["pkexec"]
+    # multi-GPU: pkexec strips the env, so pass the selected card's BDF via `env`
+    bdf = getattr(getattr(parent, "gpu", None), "bdf", None)
+    if getattr(parent, "_multi_gpu", False) and bdf:
+        cmd += ["/usr/bin/env", f"ARC_GPU_BDF={bdf}"]
+    cmd += args
     try:
-        p = subprocess.Popen(["pkexec"] + args, stderr=subprocess.PIPE, text=True)
+        p = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True)
     except OSError as e:
         parent.toast(f"Could not run: {e}")
         return
@@ -1827,29 +1863,54 @@ class Window(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="Arc GPU Dashboard")
         self.set_default_size(1240, 780)
-        self.gpu = XeGpu()
 
         prov = Gtk.CssProvider(); prov.load_from_data(CSS)
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
-        tv = Adw.ToolbarView()
+        self.gpus = list_xe_gpus()
+        self._multi_gpu = len(self.gpus) > 1
+        self._tick_id = None
+        self._reading = False
+
+        self._tv = Adw.ToolbarView()
         hb = Adw.HeaderBar()
-        self.stack = Adw.ViewStack()
-        switcher = Adw.ViewSwitcher(stack=self.stack, policy=Adw.ViewSwitcherPolicy.WIDE)
-        hb.set_title_widget(switcher)
+        self._switcher = Adw.ViewSwitcher(policy=Adw.ViewSwitcherPolicy.WIDE)
+        hb.set_title_widget(self._switcher)
+        # GPU selector — only when there's more than one xe card
+        if self._multi_gpu:
+            gi = Gtk.Image(icon_name="video-display-symbolic")
+            hb.pack_start(gi)
+            self.gpu_dd = Gtk.DropDown.new_from_strings([g["label"] for g in self.gpus])
+            self.gpu_dd.set_tooltip_text("Choose which GPU to monitor and control")
+            self.gpu_dd.connect("notify::selected", self._on_gpu_change)
+            hb.pack_start(self.gpu_dd)
+        else:
+            self.gpu_dd = None
         hb.pack_start(icon_button("view-refresh-symbolic", "Refresh readings now",
                                   lambda *_: self.refresh()))
-        tv.add_top_bar(hb)
-        tv.set_content(self.stack)
+        self._tv.add_top_bar(hb)
         self.toasts = Adw.ToastOverlay()
-        self.toasts.set_child(tv)
+        self.toasts.set_child(self._tv)
         self.set_content(self.toasts)
 
-        if not self.gpu.present:
-            self.stack.add_titled(Gtk.Label(label="No Intel xe GPU found", margin_top=40),
-                                  "none", "No GPU")
+        if not self.gpus:
+            empty = Adw.ViewStack()
+            empty.add_titled(Gtk.Label(label="No Intel xe GPU found", margin_top=40), "none", "No GPU")
+            self._switcher.set_stack(empty); self._tv.set_content(empty)
+            self.stack = empty
             return
+
+        self.gpu = XeGpu(self.gpus[0]["card"])
+        self._build_content()
+
+    def _build_content(self):
+        # (re)build all tabs for the currently-selected GPU. Called on GPU switch.
+        if self._tick_id is not None:
+            GLib.source_remove(self._tick_id); self._tick_id = None
+        self.stack = Adw.ViewStack()
+        self._switcher.set_stack(self.stack)
+        self._tv.set_content(self.stack)
 
         p1 = self.stack.add_titled(self._build_dashboard(), "dash", "Dashboard")
         p1.set_icon_name("utilities-system-monitor-symbolic")
@@ -1860,7 +1921,7 @@ class Window(Adw.ApplicationWindow):
         p2 = self.stack.add_titled(curve_wrap, "curve", "Fan Control")
         p2.set_icon_name("power-profile-balanced-symbolic")
 
-        # Overclock tab — only if the xe_gt_oc patch exposes the VF curve
+        self.oc_view = None
         if self.gpu.oc_available:
             self.oc_view = VoltageCurveView(self.gpu, self)
             self.oc_view.set_margin_start(12); self.oc_view.set_margin_end(12)
@@ -1873,7 +1934,14 @@ class Window(Adw.ApplicationWindow):
 
         self._reading = False
         self._tick()              # first async snapshot
-        GLib.timeout_add_seconds(REFRESH_SECONDS, self._tick)
+        self._tick_id = GLib.timeout_add_seconds(REFRESH_SECONDS, self._tick)
+
+    def _on_gpu_change(self, dd, _):
+        i = dd.get_selected()
+        if 0 <= i < len(self.gpus):
+            self.gpu = XeGpu(self.gpus[i]["card"])
+            self._build_content()
+            self.toast(f"Now controlling {self.gpus[i]['label']} ({self.gpus[i]['id']})")
 
     def toast(self, msg, ms=2500):
         # timeout=0 keeps Adw from auto-dismissing; we dismiss manually for a precise 2.5s.
@@ -2106,7 +2174,7 @@ class Window(Adw.ApplicationWindow):
     def _tick(self):
         # ALL sysfs reads run off the main thread — the first read after GPU idle
         # forces a wake (~0.8-1.4s); doing it here would freeze the UI.
-        if self._reading:
+        if not getattr(self, "gpu", None) or self._reading:
             return True
         self._reading = True
 
