@@ -1,8 +1,10 @@
 # Intel Arc **Pro** Battlemage — Linux fan control, GPU tuning & overclocking
 
-Working **custom fan curves**, **power/clock tuning**, **voltage-frequency-curve overclocking**,
-and **kernel-update resilience** for the **Intel Arc Pro B60 / B70** (Battlemage) on Linux, where
-the stock `xe` driver exposes only read-only fan RPM and no voltage control.
+A complete Linux control panel for the **Intel Arc Pro B60 / B70** (Battlemage) — **custom fan
+curves**, **power/clock tuning**, **voltage-frequency-curve overclocking**, a live **metrics
+dashboard**, a **fan-guarded stability test**, **multi-GPU** support, and **kernel-update
+resilience** — where the stock `xe` driver exposes only read-only fan RPM and no voltage control.
+Everything is driven from a native **GTK4 desktop app** (`xe-gpu-gui`) *and* scriptable CLI helpers.
 
 > **Overclocking now works too.** The VF (voltage-frequency) curve — the one control Windows has
 > and stock `xe` lacks — is unlocked by a small `xe_gt_oc` patch that issues the PCODE *begin →
@@ -38,6 +40,32 @@ Related upstream issue: [intel/compute-runtime #885](https://github.com/intel/co
 | Multiple GPUs | — | ✅ per-card selector; all tabs + writes re-target the chosen card |
 | Survives reboots | — | ✅ systemd |
 | Survives kernel updates | — | ✅ auto-rebuild hook |
+
+## Desktop app — `xe-gpu-gui`
+
+A native **GTK4 / libadwaita** control panel (`xe-gpu-gui`, or "Arc GPU Dashboard" in your apps
+menu). Three tabs, all writes go through `pkexec` (normal auth prompt). Full walkthrough in
+**[docs/GUI.md](docs/GUI.md)**.
+
+- **Dashboard** — a live (2 s) monitor:
+  - **Specifications** row — fixed values: device, VRAM size, power cap, power limit, clock limits,
+    hardware range, power profile, fan mode, and Power/Temp/Voltage-**limited** ✓/✗ indicators.
+  - **Metrics** — animated tiles with a custom icon (gauge / bolt / fan / RAM chip / thermometer), a
+    value that **tweens** to each reading, a scrolling **sparkline**, and a **radial ring** for the
+    percentage metrics. Covers GPU frequency (+actual), **card & GPU power draw** (derived from the
+    energy counters), power %, fan speed & duty, temperature %, and **VRAM used / usage**.
+  - **Temperatures** — every sensor (GPU / VRAM / Mem-ctrl / PCIe + all VRAM channels) with its own
+    sparkline; the number + line turn **red** near the crit limit, 🔥 on the hottest.
+  - **Metrics filter** — a modal to show/hide any metric or sensor; the choice is saved across launches.
+  - **GPU selector** — on a multi-GPU box, a header dropdown picks which card everything targets.
+- **Fan Control** — a draggable graphical fan-curve editor (10-point, presets, live temp marker) plus
+  **Auto** (stock table) and **Max** buttons.
+- **Overclock** *(needs the `xe_gt_oc` patch)* — a VF-curve editor in two modes (uniform **offset** or
+  per-point **drag-the-nodes curve**), with aligned slider+spinbox controls for voltage offset,
+  voltage limit, power, memory speed and temp limit; a colour-zoned curve graph; **preset profiles**
+  (Stock / Efficient / Balanced / Performance); **save/load your own named profiles**; and a
+  **Stability test** that runs a GPU load with the fan ramped to max and **auto-reverts** if the card
+  hangs.
 
 ## How it works
 
@@ -115,17 +143,27 @@ sudo xe-gpu-tune show
 sudo xe-gpu-tune set --power-w 150 --clk-max 2000 --clk-min 400
 sudo xe-gpu-tune reset
 
-# overclocking — voltage-frequency curve (needs the xe_gt_oc patch, see docs/OVERCLOCKING.md)
-sudo xe-gpu oc read            # dump the 85-point curve (index -> voltage mV)
-sudo xe-gpu oc offset -25      # undervolt every point 25 mV (cooler / more efficient)
-sudo xe-gpu oc set 60 980      # set a single point
-sudo xe-gpu oc reset           # restore the saved stock curve
+# overclocking — voltage/memory/temp (needs the xe_gt_oc patch, see docs/OVERCLOCKING.md)
+sudo xe-gpu-oc read             # dump the 85-point curve + memory speed + temp limit
+sudo xe-gpu-oc offset -25       # undervolt every point 25 mV (cooler / more efficient)
+sudo xe-gpu-oc offset 25 1050   # overvolt +25 mV, capped at a 1050 mV ceiling
+sudo xe-gpu-oc curve 0:820 10:880 ...   # write a full/partial custom curve (one transaction)
+sudo xe-gpu-oc mem 20000        # GDDR6 memory speed, Mbps (20000 = 20 Gbps)
+sudo xe-gpu-oc temp 95          # GPU thermal-throttle target, °C
+sudo xe-gpu-oc profile save daily   # save current voltage/memory/temp as a named profile
+sudo xe-gpu-oc profile load daily   # re-apply it (also: profile list / delete)
+sudo xe-gpu-oc reset            # restore stock curve + memory + temp
 
 # temperatures / health (read-only, no patch needed)
 xe-gpu-temps            # table of every sensor + limits, fan, power
 xe-gpu-temps watch 2    # live refresh every 2s
 xe-gpu-temps json       # machine-readable (for scripts / dashboards)
 ```
+
+Overclocks reset to stock on cold boot; choices persist to `/etc/xe-gpu-oc.conf` and are re-applied
+by `xe-gpu-oc.service`. On a multi-GPU box, set `ARC_GPU_BDF=<pci-address>` to target a specific card
+(the GUI does this automatically). VRAM usage needs `xe-gpu-vram.service` (installed + enabled by
+`install.sh`).
 
 - GUI fan curves via the **built-in editor** (`xe-gpu-gui`) — see [docs/GUI.md](docs/GUI.md).
 - GPU tuning details — see [docs/GPU-TUNING.md](docs/GPU-TUNING.md).
