@@ -173,6 +173,13 @@ signed/compressed/undocumented `PCODE_0`) and DTrace (no reference sequence exis
 *does* work is everything the control panel actually needs — **fan control, power cap, clock limits,
 and full telemetry** — all validated and multi-GPU-isolated.
 
+**Confirmed by decompiling the Windows app** (`ilspycmd` on the WinUI3 Intel Graphics Software): its
+tuning UI is *generated* from `ctlOverclockGetProperties(adapter).bSupported`. When that IGCL flag is
+`0` it logs *"Overclocking not supported by adapter"* and returns an empty property list → **no tuning
+section is ever built** (not hidden/greyed). There is **no app-side SKU/device allowlist** — the B70
+simply reports `bSupported = 0` from IGCL → KMD → firmware, the same gate as the Linux `-71`. So the
+missing B70 tuning is a faithful reflection of a driver/firmware capability, not an app quirk.
+
 If Intel later ships B70 OC (it's a Q1.26-new card), the door reopens with **zero rework**: re-check
 the app for a B70 tuning section; if it appears, DTrace `fbt:igdkmdnd64:*004c5310:entry` while tuning
 (struct `+0`=op `+4`=p1 `+8`=p2 `+0xc`=d0 `+0x10`=d1 `+0x14/0x18`=out `+0x1c`=status) and replay via
