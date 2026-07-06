@@ -15,6 +15,8 @@ Launch **Arc GPU Dashboard** from your apps menu, or run `xe-gpu-gui`.
 header — pick which card to monitor and control, and every tab (dashboard / fan / overclock) plus all
 writes re-target that card (via `ARC_GPU_BDF`). With a single GPU the selector is hidden.
 
+![Dashboard](screenshots/dashboard.png)
+
 ## Dashboard tab
 Live (2 s) monitoring. A **Specifications** row spans the top — the fixed limits & configuration,
 *not* live metrics: device, power cap, power limit (I1), clock limits, hardware clock range, power
@@ -46,6 +48,8 @@ Fan controls live on the **Fan Control tab**. Power cap, clock limits & power pr
 is **monitoring-only**. On a system *without* the patch (no Overclock tab), power/clock controls
 fall back to spinners on the Dashboard (**Power cap / Min clock / Max clock** → **Apply** / **Reset**).
 
+![Fan Control](screenshots/fan-control.png)
+
 ## Fan Control tab
 A graphical editor for the 10-point hardware fan table, plus the fan mode buttons:
 
@@ -56,6 +60,8 @@ A graphical editor for the 10-point hardware fan table, plus the fan mode button
 - The dashed vertical line shows the current package temperature.
 - **Apply** writes it as the manual curve; **Auto** hands the fan back to the card's stock table;
   **Max** runs the fan at full speed (all via `xe-fan-curve …`, prompted by polkit).
+
+![Overclock](screenshots/overclock.png)
 
 ## Overclock tab
 

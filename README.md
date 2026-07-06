@@ -19,6 +19,8 @@ Everything is driven from a native **GTK4 desktop app** (`xe-gpu-gui`) *and* scr
 
 Related upstream issue: [intel/compute-runtime #885](https://github.com/intel/compute-runtime/issues/885).
 
+![Dashboard](docs/screenshots/dashboard.png)
+
 ## What works (verified on Arc Pro B60, `8086:e211`, kernel 7.0.0 / Ubuntu 26.04)
 
 | Capability | Stock `xe` | With this toolkit |
@@ -46,6 +48,10 @@ Related upstream issue: [intel/compute-runtime #885](https://github.com/intel/co
 A native **GTK4 / libadwaita** control panel (`xe-gpu-gui`, or "Arc GPU Dashboard" in your apps
 menu). Three tabs, all writes go through `pkexec` (normal auth prompt). Full walkthrough in
 **[docs/GUI.md](docs/GUI.md)**.
+
+| Fan Control | Overclock |
+|---|---|
+| ![Fan Control](docs/screenshots/fan-control.png) | ![Overclock](docs/screenshots/overclock.png) |
 
 - **Dashboard** — a live (2 s) monitor:
   - **Specifications** row — fixed values: device, VRAM size, power cap, power limit, clock limits,
