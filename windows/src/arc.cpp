@@ -70,7 +70,9 @@ bool ArcController::init(std::string& err) {
     ctl_init_args_t args;
     zeroInit(args);
     args.AppVersion = CTL_MAKE_VERSION(CTL_IMPL_MAJOR_VERSION, CTL_IMPL_MINOR_VERSION);
-    args.flags = 0;  // Level Zero not required for the fan/OC/telemetry surface.
+    // Level Zero backend is required for the Sysman surface (fans, temperature,
+    // power, frequency); without it ctlEnumFans returns CTL_RESULT_ERROR_ZE_LOADER.
+    args.flags = CTL_INIT_FLAG_USE_LEVEL_ZERO;
 
     ctl_result_t r = lib_.ctlInit(&args, &api_);
     if (r != CTL_RESULT_SUCCESS || api_ == nullptr) {

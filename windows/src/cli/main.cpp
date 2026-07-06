@@ -199,8 +199,8 @@ int cmdTune(ArcController& a, const std::vector<std::string>& args) {
         std::printf("OC supported : %s\n", s.supported ? "yes" : "no");
         if (s.hasPowerLimit)   std::printf("Power limit  : %.1f W\n", s.powerLimitW);
         if (s.hasTempLimit)    std::printf("Temp limit   : %.1f C\n", s.tempLimitC);
-        if (s.hasFreqOffset)   std::printf("Freq offset  : %.1f\n", s.gpuFreqOffset);
-        if (s.hasVoltOffset)   std::printf("Volt offset  : %.1f\n", s.gpuVoltOffset);
+        if (s.hasGpuFreqOffset) std::printf("Freq offset  : %.1f\n", s.gpuFreqOffset);
+        if (s.hasGpuVoltOffset) std::printf("Volt offset  : %.1f\n", s.gpuVoltOffset);
         if (s.hasMemSpeed)     std::printf("Mem speed    : %.1f\n", s.memSpeed);
         return 0;
     }

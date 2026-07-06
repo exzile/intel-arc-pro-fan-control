@@ -37,8 +37,9 @@ target_include_directories(arc_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/igcl"
 )
-# Unicode Win32 APIs (RegisterServiceCtrlHandlerExW etc.).
-target_compile_definitions(arc_core PUBLIC UNICODE _UNICODE)
+# Unicode Win32 APIs (RegisterServiceCtrlHandlerExW etc.). NOMINMAX keeps
+# <windows.h> from defining min/max macros that break std::max/std::min.
+target_compile_definitions(arc_core PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 if(MSVC)
     target_compile_options(arc_core PRIVATE /W4 /permissive-)
 endif()
