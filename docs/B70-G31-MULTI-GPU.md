@@ -118,10 +118,21 @@ sequence** (or gates it differently on the workstation SKU).
 ### Reverse-engineering status / roadmap
 This is the same wall we started at for the B60, and the same tool breaks it:
 
-1. **Firmware comparison (safe, next).** Build/read `igsc` (`intel/igsc`) to compare **GSC firmware
-   versions** B60 vs B70, and check whether a firmware/config update changes the accepted opcodes.
-   B70 GSC images referenced in the wild: `bmg_g31_fwupdate.bin`,
-   `bmg_ibc-c91_e223_config-data.bin`. **Flashing is risky (brick) — read-only comparison first.**
+1. **Firmware comparison (done — read-only, via `igsc`).** The two cards run **different die-specific
+   GSC firmware**, which is where these late-binding opcodes live:
+
+   | | B60 (G21) | B70 (G31) |
+   |---|---|---|
+   | GSC FW version | `BMG__21.1182` | `BMG__31.1058` |
+   | fw-data (OEM config) | Format 2, v203, mfg 7 | Format 2, v203, mfg 44 |
+   | OPROM code | `17 00 2A 04 …` | `17 00 29 04 …` |
+
+   So the OC rejection tracks a **firmware build difference**, not a capability/fusing one (the `0x5c`
+   cap word is identical). The `BMG_31.1058` build likely doesn't implement (or gates) the opcodes the
+   `BMG_21.1182` build accepts. Two follow-ups: **(a)** check whether a *newer* `bmg_g31_fwupdate.bin`
+   (+ `bmg_ibc-c91_e223_config-data.bin`) build exists and enables them — **flashing is brick-risky,
+   do not flash without an explicit decision**; **(b)** it may simply be a different opcode set (→ #2).
+   Built with `intel/igsc` + `intel/metee`; `igsc list-devices` maps MEI↔BDF (mei1=B60, mei2=B70).
 2. **Definitive: DTrace the B70's Windows driver** while its OC UI applies a change (exactly how the
    B60 sequence — the missing `0x5f/2` begin — was found). Captures the G31's real
    opcode/domain/sequence. Needs Windows + the card + DTrace.
