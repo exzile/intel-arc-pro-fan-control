@@ -128,11 +128,24 @@ This is the same wall we started at for the B60, and the same tool breaks it:
    | OPROM code | `17 00 2A 04 …` | `17 00 29 04 …` |
 
    So the OC rejection tracks a **firmware build difference**, not a capability/fusing one (the `0x5c`
-   cap word is identical). The `BMG_31.1058` build likely doesn't implement (or gates) the opcodes the
-   `BMG_21.1182` build accepts. Two follow-ups: **(a)** check whether a *newer* `bmg_g31_fwupdate.bin`
-   (+ `bmg_ibc-c91_e223_config-data.bin`) build exists and enables them — **flashing is brick-risky,
-   do not flash without an explicit decision**; **(b)** it may simply be a different opcode set (→ #2).
+   cap word is identical). The `BMG_31.1058` build rejects the opcodes the `BMG_21.1182` build accepts.
    Built with `intel/igsc` + `intel/metee`; `igsc list-devices` maps MEI↔BDF (mei1=B60, mei2=B70).
+
+   **A newer G31 firmware exists but is only a marginal bump.** Extracted the GSC images from the
+   latest Intel driver (`gfx_win_101.8804.exe`, Q2.26 — its NSIS/RAR SFX only unpacks on Windows;
+   `igsc fw version --image` reads the bundled version):
+
+   | | on-card | bundled in 8804 driver |
+   |---|---|---|
+   | B70 (G31) | `BMG__31.1058` | **`BMG__31.1062`** (4 builds newer) |
+   | B60 (G21) | `BMG__21.1182` | `BMG__21.1182` (already current) |
+
+   Static analysis is inconclusive: **both** images contain a `PCODE_0` / `PCODE_0.met` module (the
+   PCODE firmware where the OC opcodes live *is* present on the G31), and the rest is signed/compressed
+   (no readable OC strings). So the gate is inside the compiled PCODE logic — a 4-build bump *could*
+   flip it but far more likely carries minor fixes, and Pro-SKU OC gating may be intentional. We
+   **did not flash** (user directive + documented Gen5→Gen4 permanent-downgrade risk on this card).
+   Whether `1062` enables OC is only knowable by flashing (off the table) or by #2 below.
 2. **Definitive: DTrace the B70's Windows driver** while its OC UI applies a change (exactly how the
    B60 sequence — the missing `0x5f/2` begin — was found). Captures the G31's real
    opcode/domain/sequence. Needs Windows + the card + DTrace.
