@@ -101,11 +101,7 @@ void runLoop() {
     std::string err;
     if (!a.init(err)) { logLine("init failed: " + err); return; }
     for (;;) {
-        if (!applyOnce(a)) {
-            a.shutdown();
-            std::string e2;
-            if (!a.init(e2)) logLine("re-init failed: " + e2);
-        }
+        applyOnce(a);   // re-assert the profile each cycle (the HW curve persists regardless)
         const DWORD w = ::WaitForSingleObject(g_stopEvent, kReapplyIntervalMs);
         if (w == WAIT_OBJECT_0) break;     // stop requested
     }

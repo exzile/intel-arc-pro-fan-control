@@ -133,10 +133,11 @@ bool ArcController::init(std::string& err) {
 }
 
 void ArcController::shutdown() {
-    if (api_ && lib_.ctlClose) {
-        lib_.ctlClose(api_);
-        api_ = nullptr;
-    }
+    // Do NOT ctlClose here: with the Level Zero backend, ctlClose (and unloading
+    // ControlLib) crashes during Level Zero teardown. Drop our references and let
+    // the OS reclaim everything at process exit (this is a long-lived service /
+    // a short-lived CLI, so leaking until exit is fine).
+    api_ = nullptr;
     fan_ = nullptr;
     adapters_.clear();
     lib_.unload();
@@ -491,6 +492,7 @@ bool ArcController::setGpuFreqOffset(double value, std::string& err) {
     ctl_device_adapter_handle_t h = handle();
     if (!h) { err = "no adapter selected"; return false; }
     ARC_REQUIRE_FN(ctlOverclockGpuFrequencyOffsetSetV2);
+    if (!ocSetWaiver(err)) return false;
     ctl_result_t r = lib_.ctlOverclockGpuFrequencyOffsetSetV2(h, value);
     if (r != CTL_RESULT_SUCCESS) { err = "set GPU frequency offset failed (" + ctlErr(r) + ")."; return false; }
     return true;
@@ -511,6 +513,7 @@ bool ArcController::setMemSpeed(double value, std::string& err) {
     ctl_device_adapter_handle_t h = handle();
     if (!h) { err = "no adapter selected"; return false; }
     ARC_REQUIRE_FN(ctlOverclockVramMemSpeedLimitSetV2);
+    if (!ocSetWaiver(err)) return false;
     ctl_result_t r = lib_.ctlOverclockVramMemSpeedLimitSetV2(h, value);
     if (r != CTL_RESULT_SUCCESS) { err = "set memory speed failed (" + ctlErr(r) + ")."; return false; }
     return true;
@@ -520,6 +523,8 @@ bool ArcController::setPowerLimit(double watts, std::string& err) {
     ctl_device_adapter_handle_t h = handle();
     if (!h) { err = "no adapter selected"; return false; }
     ARC_REQUIRE_FN(ctlOverclockPowerLimitSetV2);
+    // All OC V2 setters require the warranty waiver first (else -> DATA_WRITE).
+    if (!ocSetWaiver(err)) return false;
     ctl_result_t r = lib_.ctlOverclockPowerLimitSetV2(h, watts);
     if (r != CTL_RESULT_SUCCESS) { err = "set power limit failed (" + ctlErr(r) + ")."; return false; }
     return true;
@@ -529,6 +534,7 @@ bool ArcController::setTempLimit(double celsius, std::string& err) {
     ctl_device_adapter_handle_t h = handle();
     if (!h) { err = "no adapter selected"; return false; }
     ARC_REQUIRE_FN(ctlOverclockTemperatureLimitSetV2);
+    if (!ocSetWaiver(err)) return false;
     ctl_result_t r = lib_.ctlOverclockTemperatureLimitSetV2(h, celsius);
     if (r != CTL_RESULT_SUCCESS) { err = "set temperature limit failed (" + ctlErr(r) + ")."; return false; }
     return true;
