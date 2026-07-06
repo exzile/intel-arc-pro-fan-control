@@ -17,8 +17,11 @@ Live (2 s) monitoring. A **Specifications** row spans the top — the fixed limi
 profile, fan mode.
 
 Below it, **Metrics** and **Temperatures** are two labelled sections that fill the rest of the space,
-each a wrap-to-fit grid of uniform **tiles with a custom icon (gauge / bolt / fan / RAM chip / thermometer), and scrolling sparklines**. Tiles are neutral; **only the
-number and its graph line turn red** when a sensor runs hot (within 12 °C of its crit limit).
+each a wrap-to-fit grid of uniform **animated tiles**: a custom icon (gauge / bolt / fan / RAM chip /
+thermometer) that moves with the data — **the fan spins at the real fan speed, the frequency gauge
+sweeps, the power bolt flickers under load** — a big value that **tweens** to each new reading, and a
+live visual (scrolling sparkline, or a **radial % ring** for percentage metrics). Tiles lift on hover
+and **flash** when a sensor crosses into hot; **only the number + its line turn red** near the crit limit.
 
 **Metrics** are named after Intel Arc Control where a matching xe reading exists. The core
 metrics are always shown — **GPU Frequency**, **GPU Card Power**, **GPU Temperature**, **GPU Fan

@@ -5,7 +5,7 @@
 # xe_gt_oc patch exposes .../gt0/oc/vf_curve).
 # Controls call xe-fan-curve / xe-gpu-tune / xe-gpu-oc via pkexec (polkit prompts
 # for writes). Reads are unprivileged sysfs; no kernel poking here.
-import os, glob, subprocess, threading, collections, json, math
+import os, glob, subprocess, threading, collections, json, math, re
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -29,7 +29,15 @@ CSS = b"""
 
 /* --- dashboard metric tiles (uniform, neutral; only value+line go red when hot) --- */
 .mtile  { background: alpha(@window_fg_color,0.05); border-radius: 12px; padding: 9px 11px;
-          border: 2px solid alpha(@window_fg_color,0.10); }
+          border: 2px solid alpha(@window_fg_color,0.10);
+          transition: transform 140ms ease, box-shadow 160ms ease, border-color 160ms ease; }
+.mtile:hover { transform: translateY(-2px); border-color: alpha(@accent_color,0.55);
+               box-shadow: 0 5px 16px alpha(#000,0.35); }
+.mtile.flash { animation: tileflash 0.7s ease-out; }
+@keyframes tileflash {
+  0%   { box-shadow: 0 0 0 0 alpha(#ff5c57,0.75); }
+  100% { box-shadow: 0 0 0 10px alpha(#ff5c57,0.0); }
+}
 .mlabel { font-size:0.70em; font-weight:800; opacity:0.55; letter-spacing:.06em; }
 .mvalue { font-size:1.7em; font-weight:800; }
 .mvalue.hot { color:#ff5c57; }        /* value turns red when a sensor is near its crit limit */
@@ -394,7 +402,7 @@ def build_metrics(sample):
                           "sub": (f"{round((d['fan'].get('duty') or 0) / 255 * 100)}% · "
                                   f"{d['fan'].get('mode', '?')}" if d["fan"].get("duty") is not None
                                   else d["fan"].get("mode"))},
-               spark=True, core=True, group="Fan", icon="fan"),
+               spark=True, fixed=(0, 5000), core=True, group="Fan", icon="fan"),
         # --- optional (filter, hidden by default) ---
         Metric("freq_act", "GPU Actual Frequency", "MHz",
                lambda d: {"text": _num(d["clocks"].get("act")), "val": d["clocks"].get("act")},
@@ -446,15 +454,17 @@ def build_temp_metrics(sample):
 
 
 # ---- small custom vector icons (drawn in Cairo so they always render + tint) ----
-def _ic_freq(cr, w, h, col):        # gauge / speedometer
+def _ic_freq(cr, w, h, col, frac=0.7):   # gauge / speedometer (needle sweeps to frac)
     cx, cy, R = w / 2, h - 2, min(w, h) / 2
     cr.set_source_rgba(*col, 0.9); cr.set_line_width(1.5)
     cr.arc(cx, cy, R - 1, math.pi, 2 * math.pi); cr.stroke()
-    cr.move_to(cx, cy); cr.line_to(cx + (R - 2) * 0.7, cy - (R - 2) * 0.7); cr.stroke()
+    ang = math.pi + max(0.0, min(1.0, frac)) * math.pi   # left -> up -> right
+    cr.move_to(cx, cy); cr.line_to(cx + (R - 2) * math.cos(ang), cy + (R - 2) * math.sin(ang))
+    cr.stroke()
 
 
-def _ic_power(cr, w, h, col):       # lightning bolt
-    cr.set_source_rgba(*col, 0.95); cx = w / 2
+def _ic_power(cr, w, h, col, alpha=0.95):   # lightning bolt (alpha flickers under load)
+    cr.set_source_rgba(*col, alpha); cx = w / 2
     pts = [(cx + 1, 1), (cx - 3.5, h * 0.58), (cx - 0.5, h * 0.58),
            (cx - 1.5, h - 1), (cx + 4, h * 0.4), (cx + 1, h * 0.4)]
     cr.move_to(*pts[0])
@@ -497,22 +507,33 @@ def _ic_vram(cr, w, h, col):        # RAM chip: body + die line + pins
 ICONS = {"freq": _ic_freq, "power": _ic_power, "fan": _ic_fan, "temp": _ic_temp, "vram": _ic_vram}
 
 
+_NUMRE = re.compile(r"^-?\d+(?:\.\d+)?$")
+
+
 class MetricTile(Gtk.Box):
-    """A dashboard metric card: an icon + label, big value + unit, a sub-line, and a live
-    scrolling sparkline of recent history — the Windows-style live metric panel."""
+    """A dashboard metric card: icon + label, big value + unit, a sub-line, and a live
+    bottom visual (scrolling sparkline, or a radial ring for % metrics). Animated:
+    icons move with the data (fan spins, gauge sweeps, bolt flickers), values tween to
+    their new reading, and the tile flashes when it crosses into hot."""
     def __init__(self, label, unit="", spark=True, fixed=None, icon=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         self.add_css_class("mtile"); self.set_hexpand(True)
         self.hist = collections.deque(maxlen=SPARK_MAXPTS)
-        self._fixed = fixed              # (lo, hi) fixed y-range, or None = autoscale
+        self._fixed = fixed
         self._rgb = (0.21, 0.52, 0.89)
         self._icon = icon
+        self._ring = (unit == "%")              # percent metrics render as a radial ring
+        # animation state
+        self._spin = 0.0; self._needle = 0.7; self._anim = 0.0
+        self._ring_cur = 0.0; self._ring_tgt = 0.0
+        self._shown = None; self._dec = 0; self._tw_from = 0.0; self._tw_to = 0.0; self._tw_t = None
+        self._was_hot = False; self._tick_id = None; self._last_t = 0
         head = Gtk.Box(spacing=5)
         if icon in ICONS:
             self.icon_area = Gtk.DrawingArea()
             self.icon_area.set_content_width(18); self.icon_area.set_content_height(15)
             self.icon_area.set_valign(Gtk.Align.CENTER)
-            self.icon_area.set_draw_func(lambda a, cr, w, h, *_: ICONS[self._icon](cr, w, h, self._rgb))
+            self.icon_area.set_draw_func(self._draw_icon)
             head.append(self.icon_area)
         else:
             self.icon_area = None
@@ -528,30 +549,104 @@ class MetricTile(Gtk.Box):
         self.append(vr)
         self.sub = Gtk.Label(xalign=0); self.sub.add_css_class("msub"); self.sub.set_visible(False)
         self.append(self.sub)
-        if spark:
-            self.area = Gtk.DrawingArea(hexpand=True); self.area.set_content_height(30)
+        if spark or self._ring:
+            self.area = Gtk.DrawingArea(hexpand=True)
+            self.area.set_content_height(46 if self._ring else 30)
             self.area.set_draw_func(self._draw)
             self.append(self.area)
         else:
             self.area = None
 
+    # ---- icon (animated) ----
+    def _draw_icon(self, area, cr, w, h, *_):
+        ic = self._icon
+        if ic == "fan":
+            cr.translate(w / 2, h / 2); cr.rotate(self._spin); cr.translate(-w / 2, -h / 2)
+            _ic_fan(cr, w, h, self._rgb)
+        elif ic == "freq":
+            _ic_freq(cr, w, h, self._rgb, self._needle)
+        elif ic == "power":
+            fl = 0.95 - (0.32 * abs(math.sin(self._last_t / 1.4e5))) if self._anim > 0.6 else 0.95
+            _ic_power(cr, w, h, self._rgb, fl)
+        elif ic in ICONS:
+            ICONS[ic](cr, w, h, self._rgb)
+
+    # ---- update ----
     def update(self, text, spark_val=None, rgb=None, state=None, sub=None):
-        self.val.set_text(text)
         if rgb is not None and rgb != self._rgb:
             self._rgb = rgb
             if self.icon_area is not None:
-                self.icon_area.queue_draw()      # re-tint the icon when the colour changes
-        # only the number colours (tile stays neutral); "hot" => red
-        if state == "hot":
-            self.val.add_css_class("hot")
+                self.icon_area.queue_draw()
+        hot = (state == "hot")
+        if hot and not self._was_hot:           # flash on crossing into hot
+            self.add_css_class("flash")
+            GLib.timeout_add(700, lambda: (self.remove_css_class("flash"), False)[1])
+        self._was_hot = hot
+        (self.val.add_css_class if hot else self.val.remove_css_class)("hot")
+        # value: tween when it's a plain number, else set directly
+        if _NUMRE.match(text):
+            tgt = float(text); self._dec = len(text.split(".")[1]) if "." in text else 0
+            if self._shown is None:
+                self._shown = tgt; self.val.set_text(text)
+            elif abs(tgt - self._shown) > 1e-9:
+                self._tw_from = self._shown; self._tw_to = tgt; self._tw_t = 0.0
         else:
-            self.val.remove_css_class("hot")
+            self._shown = None; self.val.set_text(text)
         if sub is not None:
             self.sub.set_text(sub); self.sub.set_visible(bool(sub))
-        if spark_val is not None and self.area is not None:
-            self.hist.append(spark_val); self.area.queue_draw()
+        # animation targets
+        if spark_val is not None:
+            if self._fixed:
+                lo, hi = self._fixed
+                self._anim = max(0.0, min(1.0, (spark_val - lo) / (hi - lo))) if hi > lo else 0.0
+            if self._ring:
+                self._ring_tgt = max(0.0, min(100.0, spark_val))
+            elif self.area is not None:
+                self.hist.append(spark_val); self.area.queue_draw()
+        self._ensure_tick()
 
+    def _ensure_tick(self):
+        if self._tick_id is None:
+            self._last_t = 0
+            self._tick_id = self.add_tick_callback(self._tick)
+
+    def _tick(self, widget, clock):
+        now = clock.get_frame_time()
+        dt = (now - self._last_t) / 1e6 if self._last_t else 0.016
+        self._last_t = now
+        busy = False
+        if self._tw_t is not None:              # number tween (ease-out)
+            self._tw_t += dt / 0.22
+            if self._tw_t >= 1.0:
+                self._shown = self._tw_to; self._tw_t = None
+                self.val.set_text(self._fmt(self._shown))
+            else:
+                e = 1 - (1 - self._tw_t) ** 3
+                self.val.set_text(self._fmt(self._tw_from + (self._tw_to - self._tw_from) * e))
+                busy = True
+        if self._icon == "fan" and self.icon_area and self._anim > 0.01:
+            self._spin = (self._spin + dt * (0.6 + self._anim * 8.0)) % (2 * math.pi)
+            self.icon_area.queue_draw(); busy = True
+        elif self._icon == "freq" and self.icon_area and abs(self._needle - self._anim) > 0.003:
+            self._needle += (self._anim - self._needle) * min(dt * 6.0, 1.0)
+            self.icon_area.queue_draw(); busy = True
+        elif self._icon == "power" and self.icon_area and self._anim > 0.6:
+            self.icon_area.queue_draw(); busy = True
+        if self._ring and self.area and abs(self._ring_cur - self._ring_tgt) > 0.2:
+            self._ring_cur += (self._ring_tgt - self._ring_cur) * min(dt * 6.0, 1.0)
+            self.area.queue_draw(); busy = True
+        if not busy:
+            self._tick_id = None
+            return False
+        return True
+
+    def _fmt(self, v):
+        return f"{v:.{self._dec}f}"
+
+    # ---- bottom visual ----
     def _draw(self, area, cr, w, h, *_):
+        if self._ring:
+            self._draw_ring(cr, w, h); return
         if len(self.hist) < 2:
             return
         r, g, b = self._rgb
@@ -561,8 +656,6 @@ class MetricTile(Gtk.Box):
         n = len(self.hist)
         cap = self.hist.maxlen or n
         step = w / max(cap - 1, 1)
-        # newest sample pinned at the right edge; the trace grows leftward and, once the
-        # history is full, scrolls right-to-left as the oldest points drop off.
         X = lambda i: w - (n - 1 - i) * step                 # noqa: E731
         Y = lambda v: h - 2 - (v - lo) / (hi - lo) * (h - 4)  # noqa: E731
         cr.move_to(X(0), h)
@@ -574,6 +667,19 @@ class MetricTile(Gtk.Box):
         for i, v in enumerate(self.hist):
             (cr.line_to if i else cr.move_to)(X(i), Y(v))
         cr.stroke()
+        # glowing leading dot
+        lx, ly = X(n - 1), Y(self.hist[-1])
+        cr.set_source_rgba(r, g, b, 0.30); cr.arc(lx, ly, 3.2, 0, 6.29); cr.fill()
+        cr.set_source_rgba(r, g, b, 1.0); cr.arc(lx, ly, 1.6, 0, 6.29); cr.fill()
+
+    def _draw_ring(self, cr, w, h):
+        cx, cy, R = w / 2, h / 2, min(w, h) / 2 - 3
+        r, g, b = self._rgb
+        a0 = math.radians(135); a1 = math.radians(135 + 270)
+        cr.set_line_width(4.5); cr.set_line_cap(1)     # round caps
+        cr.set_source_rgba(r, g, b, 0.15); cr.arc(cx, cy, R, a0, a1); cr.stroke()
+        frac = max(0.0, min(1.0, self._ring_cur / 100.0))
+        cr.set_source_rgba(r, g, b, 0.95); cr.arc(cx, cy, R, a0, a0 + (a1 - a0) * frac); cr.stroke()
 
 
 HELPER_PATHS = {"xe-fan-curve": "/usr/local/bin/xe-fan-curve",
