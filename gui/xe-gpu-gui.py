@@ -537,8 +537,16 @@ class MetricTile(Gtk.Box):
             head.append(self.icon_area)
         else:
             self.icon_area = None
-        self.lbl = Gtk.Label(label=label.upper(), xalign=0); self.lbl.add_css_class("mlabel")
+        self.lbl = Gtk.Label(label=label.upper(), xalign=0, hexpand=True); self.lbl.add_css_class("mlabel")
         head.append(self.lbl)
+        if self._ring:      # small gauge ring tucked into the top-right corner (% metrics)
+            self.ring_area = Gtk.DrawingArea()
+            self.ring_area.set_content_width(26); self.ring_area.set_content_height(26)
+            self.ring_area.set_valign(Gtk.Align.START)
+            self.ring_area.set_draw_func(self._draw_ring)
+            head.append(self.ring_area)
+        else:
+            self.ring_area = None
         self.append(head)
         vr = Gtk.Box(spacing=4)
         self.val = Gtk.Label(label="—", xalign=0); self.val.add_css_class("mvalue")
@@ -549,9 +557,8 @@ class MetricTile(Gtk.Box):
         self.append(vr)
         self.sub = Gtk.Label(xalign=0); self.sub.add_css_class("msub"); self.sub.set_visible(False)
         self.append(self.sub)
-        if spark or self._ring:
-            self.area = Gtk.DrawingArea(hexpand=True)
-            self.area.set_content_height(46 if self._ring else 30)
+        if spark:           # sparkline (line graph) at the bottom for every metric
+            self.area = Gtk.DrawingArea(hexpand=True); self.area.set_content_height(30)
             self.area.set_draw_func(self._draw)
             self.append(self.area)
         else:
@@ -601,7 +608,7 @@ class MetricTile(Gtk.Box):
                 self._anim = max(0.0, min(1.0, (spark_val - lo) / (hi - lo))) if hi > lo else 0.0
             if self._ring:
                 self._ring_tgt = max(0.0, min(100.0, spark_val))
-            elif self.area is not None:
+            if self.area is not None:               # sparkline for every metric
                 self.hist.append(spark_val); self.area.queue_draw()
         self._ensure_tick()
 
@@ -632,9 +639,9 @@ class MetricTile(Gtk.Box):
             self.icon_area.queue_draw(); busy = True
         elif self._icon == "power" and self.icon_area and self._anim > 0.6:
             self.icon_area.queue_draw(); busy = True
-        if self._ring and self.area and abs(self._ring_cur - self._ring_tgt) > 0.2:
+        if self._ring and self.ring_area and abs(self._ring_cur - self._ring_tgt) > 0.2:
             self._ring_cur += (self._ring_tgt - self._ring_cur) * min(dt * 6.0, 1.0)
-            self.area.queue_draw(); busy = True
+            self.ring_area.queue_draw(); busy = True
         if not busy:
             self._tick_id = None
             return False
@@ -643,10 +650,8 @@ class MetricTile(Gtk.Box):
     def _fmt(self, v):
         return f"{v:.{self._dec}f}"
 
-    # ---- bottom visual ----
+    # ---- bottom sparkline ----
     def _draw(self, area, cr, w, h, *_):
-        if self._ring:
-            self._draw_ring(cr, w, h); return
         if len(self.hist) < 2:
             return
         r, g, b = self._rgb
@@ -672,12 +677,12 @@ class MetricTile(Gtk.Box):
         cr.set_source_rgba(r, g, b, 0.30); cr.arc(lx, ly, 3.2, 0, 6.29); cr.fill()
         cr.set_source_rgba(r, g, b, 1.0); cr.arc(lx, ly, 1.6, 0, 6.29); cr.fill()
 
-    def _draw_ring(self, cr, w, h):
-        cx, cy, R = w / 2, h / 2, min(w, h) / 2 - 3
+    def _draw_ring(self, area, cr, w, h, *_):
+        cx, cy, R = w / 2, h / 2, min(w, h) / 2 - 2
         r, g, b = self._rgb
         a0 = math.radians(135); a1 = math.radians(135 + 270)
-        cr.set_line_width(4.5); cr.set_line_cap(1)     # round caps
-        cr.set_source_rgba(r, g, b, 0.15); cr.arc(cx, cy, R, a0, a1); cr.stroke()
+        cr.set_line_width(3.0); cr.set_line_cap(1)     # round caps
+        cr.set_source_rgba(r, g, b, 0.16); cr.arc(cx, cy, R, a0, a1); cr.stroke()
         frac = max(0.0, min(1.0, self._ring_cur / 100.0))
         cr.set_source_rgba(r, g, b, 0.95); cr.arc(cx, cy, R, a0, a0 + (a1 - a0) * frac); cr.stroke()
 
