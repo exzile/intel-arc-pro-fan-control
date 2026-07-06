@@ -59,24 +59,25 @@ void setState(DWORD state, DWORD exitCode = NO_ERROR, DWORD waitHint = 0) {
     if (g_statusHandle) ::SetServiceStatus(g_statusHandle, &g_status);
 }
 
-// Load config + apply once. Re-inits the controller each pass so a driver
-// reset (which invalidates IGCL handles) is recovered cleanly.
-void applyOnce() {
-    ArcController a;
-    std::string err;
-    if (!a.init(err)) { logLine("init failed: " + err); return; }
-
+// Load config + apply once, reusing a persistent controller. Re-creating the
+// controller (and thus ctlClose + Level Zero teardown) every pass crashed the
+// process, so init is done ONCE in runLoop and the handle is held for the
+// service lifetime. Returns false if the apply failed (handle may be stale).
+bool applyOnce(ArcController& a) {
     AppConfig cfg;
+    std::string err;
     loadConfig(cfg, err);
     if (cfg.fanMode == FanMode::None && !cfg.ocApply) {
         logLine("no saved profile to apply");
-        return;
+        return true;
     }
     std::string applyErr;
-    if (applyProfile(a, cfg, applyErr))
+    if (applyProfile(a, cfg, applyErr)) {
         logLine("profile applied");
-    else
-        logLine("profile applied with warnings: " + applyErr);
+        return true;
+    }
+    logLine("profile applied with warnings: " + applyErr);
+    return false;
 }
 
 DWORD WINAPI ServiceCtrlHandler(DWORD ctrl, DWORD, LPVOID, LPVOID) {
@@ -94,11 +95,19 @@ DWORD WINAPI ServiceCtrlHandler(DWORD ctrl, DWORD, LPVOID, LPVOID) {
 }
 
 void runLoop() {
-    applyOnce();   // startup apply
+    // Init IGCL ONCE and hold it for the service lifetime (owns the fan on a
+    // clean boot driver state); re-init only if an apply fails (driver reset).
+    ArcController a;
+    std::string err;
+    if (!a.init(err)) { logLine("init failed: " + err); return; }
     for (;;) {
+        if (!applyOnce(a)) {
+            a.shutdown();
+            std::string e2;
+            if (!a.init(e2)) logLine("re-init failed: " + e2);
+        }
         const DWORD w = ::WaitForSingleObject(g_stopEvent, kReapplyIntervalMs);
         if (w == WAIT_OBJECT_0) break;     // stop requested
-        applyOnce();                       // periodic re-apply
     }
 }
 

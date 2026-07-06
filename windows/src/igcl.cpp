@@ -44,10 +44,10 @@ bool IgclLib::load() {
 }
 
 void IgclLib::unload() {
-    if (module_) {
-        ::FreeLibrary(module_);
-        module_ = nullptr;
-    }
+    // Deliberately do NOT FreeLibrary(module_): ControlLib.dll initializes the
+    // Level Zero loader/driver, and unloading it mid-process crashes during
+    // Level Zero teardown. Leave it mapped; the OS reclaims it at process exit.
+    module_ = nullptr;
 }
 
 } // namespace arc
