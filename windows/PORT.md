@@ -37,7 +37,7 @@ The alternatives considered and why IGCL won:
 | Throttle reasons | `freq0/throttle/reason_*` | telemetry `gpu*Limited` flags | ✅ |
 | Boot persistence | systemd `*.service` | `arc-fan-service` (SCM) | ✅ |
 | Multi-GPU targeting | `ARC_GPU_BDF` | `--bdf` / `ARC_GPU_BDF` | ✅ |
-| Native GUI | GTK4 `xe-gpu-gui` | — | ⬜ not yet |
+| Native GUI | GTK4 `xe-gpu-gui` | Win32/GDI `arc-gpu-gui` | 🟡 dashboard done; draggable fan-curve editor + OC tab pending |
 | Per-sensor temp table | `xe-gpu-temps` (12 VRAM channels) | `ctlEnumTemperatureSensors` → `arc-gpu temps` | ✅ (IGCL exposes GPU/VRAM/global, not 12 VRAM channels) |
 | Named OC profiles | `xe-gpu-oc profile save/load` | `arc-gpu oc profile save/load/list/delete` | ✅ |
 | Stability test | `xe-gpu-stress` | — | ⬜ not yet |
@@ -61,8 +61,10 @@ The alternatives considered and why IGCL won:
 2. ~~Named OC profiles~~ — **done** (`arc-gpu oc profile save/load/list/delete`).
 3. ~~VRAM used/total + memory props~~ — **done** (`arc-gpu status`, via
    `ctlMemoryGetState`; no root needed unlike the Linux debugfs path).
-4. **Native GUI** — a WinUI 3 / Win32 dashboard + fan-curve + OC editor over
-   `arc_core` (the CLI and service already share that library).
+4. **Native GUI** — 🟡 partial: a Win32/GDI **dashboard** (`arc-gpu-gui`) with a
+   live telemetry view, GPU selector, and Fan Auto/Max/Apply buttons is done.
+   Still to add: the draggable fan-curve editor and the VF-curve/OC tab from the
+   Linux GUI (use the `arc-gpu` CLI for those meanwhile).
 5. **Stability test** — a fan-guarded GPU load with auto-revert, porting
    `xe-gpu-stress`.
 6. **Installer** — MSI/WiX that fetches nothing, drops the binaries, creates the

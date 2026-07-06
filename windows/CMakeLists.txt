@@ -49,4 +49,8 @@ target_link_libraries(arc-gpu PRIVATE arc_core)
 add_executable(arc-fan-service src/service/service_main.cpp)
 target_link_libraries(arc-fan-service PRIVATE arc_core advapi32)
 
-install(TARGETS arc-gpu arc-fan-service RUNTIME DESTINATION bin)
+# Native Win32/GDI dashboard. WIN32 => GUI subsystem (wWinMain, no console).
+add_executable(arc-gpu-gui WIN32 src/gui/main.cpp)
+target_link_libraries(arc-gpu-gui PRIVATE arc_core comctl32)
+
+install(TARGETS arc-gpu arc-fan-service arc-gpu-gui RUNTIME DESTINATION bin)

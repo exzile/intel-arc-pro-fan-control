@@ -35,6 +35,7 @@ windows/
     apply.hpp / .cpp          apply a saved profile (shared by CLI + service)
     cli/main.cpp              arc-gpu command-line tool
     service/service_main.cpp  arc-fan-service Windows service
+    gui/main.cpp              arc-gpu-gui Win32/GDI dashboard
 ```
 
 ## Build
@@ -51,8 +52,16 @@ curl -L -o windows/third_party/igcl/igcl_api.h `
 cd windows
 cmake -B build -A x64
 cmake --build build --config Release
-# -> build/Release/arc-gpu.exe and build/Release/arc-fan-service.exe
+# -> build/Release/arc-gpu.exe, arc-fan-service.exe, arc-gpu-gui.exe
 ```
+
+## Desktop dashboard — `arc-gpu-gui`
+
+A native Win32/GDI window (no external toolkit) showing a live 1 s view of
+clocks, card/GPU power, temperature, utilisation, fan and VRAM, with a GPU
+selector and **Fan Auto / Fan Max / Apply** buttons. Run it elevated to allow the
+fan buttons to take effect. The draggable fan-curve editor and OC tab from the
+Linux GUI aren't ported yet — use the `arc-gpu` CLI below for those.
 
 ## Use (run from an elevated / Administrator prompt)
 
