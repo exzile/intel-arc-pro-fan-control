@@ -1,4 +1,4 @@
-# install.ps1 — install the Arc Fan Control Windows tools + service.
+# install.ps1 - install the Arc Fan Control Windows tools + service.
 #
 # Windows analogue of the repo's install.sh. Copies the built binaries to
 # Program Files, creates the ProgramData config directory, registers and starts
@@ -14,7 +14,7 @@
 #   -KeepIntelService   do NOT disable Intel's Graphics Software service
 #
 # By default this DISABLES the Intel Graphics Software service, because it holds
-# EXCLUSIVE ownership of the GPU fan and overclock controls — while it runs, our
+# EXCLUSIVE ownership of the GPU fan and overclock controls - while it runs, our
 # fan/OC writes are ignored (the driver reports canControl=false). Disabling it
 # lets ArcFanControl own the fan + overclocking. Trade-off: the Intel Arc Control
 # app's live tuning/telemetry stops working. uninstall.ps1 re-enables it.
@@ -93,7 +93,7 @@ if (-not $KeepIntelService) {
         try {
             if ($s.Status -ne 'Stopped') { Stop-Service -Name $svc -Force -ErrorAction Stop }
             Set-Service -Name $svc -StartupType Disabled -ErrorAction Stop
-            Write-Host "Disabled '$($s.DisplayName)' ($svc) — ArcFanControl now owns the fan/OC."
+            Write-Host "Disabled '$($s.DisplayName)' ($svc) - ArcFanControl now owns the fan/OC."
         } catch {
             Write-Warning "Could not disable ${svc}: $_"
         }

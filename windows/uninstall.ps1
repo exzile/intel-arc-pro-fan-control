@@ -1,4 +1,4 @@
-# uninstall.ps1 — remove the Arc Fan Control tools + service.
+# uninstall.ps1 - remove the Arc Fan Control tools + service.
 #
 # Run from an elevated PowerShell:
 #   powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1
