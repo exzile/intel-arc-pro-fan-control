@@ -363,17 +363,35 @@ void reselect(HWND hwnd) {
     }
 }
 
-void applyCurve(HWND hwnd) {
+// The ArcFanControl SERVICE (running as SYSTEM) is the SINGLE owner of the fan.
+// The GUI only edits the saved profile and signals the service to apply it — it
+// NEVER writes IGCL fan state directly. A non-elevated GUI write, or an invalid
+// (e.g. non-monotonic) curve, can otherwise silently lock the fan into a
+// no-control state until a driver reset.
+void nudgeService() {
+    HANDLE e = ::OpenEventW(EVENT_MODIFY_STATE, FALSE, L"Global\\ArcFanControlApply");
+    if (e) { ::SetEvent(e); ::CloseHandle(e); }
+    // If the service isn't running, its next start / 60s cycle picks up the config.
+}
+
+// Save the fan portion of the profile and ask the service to apply it now.
+bool saveFanProfile(HWND hwnd, FanMode mode, const std::vector<FanPoint>& curve, int fixedPct) {
     std::string err;
-    if (!g_arc.fanSetCurve(g_curve, err)) {
-        ::MessageBoxW(hwnd, widen(err).c_str(), L"Apply Curve", MB_ICONWARNING);
-        return;
-    }
     AppConfig cfg; loadConfig(cfg, err);
     if (const AdapterInfo* d = g_arc.current()) cfg.bdf = d->bdfString();
-    cfg.fanMode = FanMode::Curve;
-    cfg.curve = g_curve;
-    saveConfig(cfg, err);
+    cfg.fanMode = mode;
+    if (mode == FanMode::Curve) cfg.curve = curve;
+    if (mode == FanMode::Fixed) cfg.fixedPercent = fixedPct;
+    if (!saveConfig(cfg, err)) {
+        ::MessageBoxW(hwnd, widen("Could not save profile: " + err).c_str(), L"Fan", MB_ICONWARNING);
+        return false;
+    }
+    nudgeService();
+    return true;
+}
+
+void applyCurve(HWND hwnd) {
+    saveFanProfile(hwnd, FanMode::Curve, g_curve, 0);
 }
 
 void createControls(HWND hwnd) {
@@ -481,13 +499,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (id == kIdCombo && HIWORD(wp) == CBN_SELCHANGE) { reselect(hwnd); return 0; }
             if (id == kIdBtnDash)  { setView(hwnd, View::Dashboard); return 0; }
             if (id == kIdBtnCurve) { setView(hwnd, View::FanCurve); return 0; }
-            if (id == kIdBtnAuto)  { std::string e; if (!g_arc.fanSetAuto(e)) ::MessageBoxW(hwnd, widen(e).c_str(), L"Fan", MB_ICONWARNING); return 0; }
-            if (id == kIdBtnMax)   { std::string e; if (!g_arc.fanSetFixed(100, e)) ::MessageBoxW(hwnd, widen(e).c_str(), L"Fan", MB_ICONWARNING); return 0; }
+            if (id == kIdBtnAuto)  { saveFanProfile(hwnd, FanMode::Auto, {}, 0); return 0; }
+            if (id == kIdBtnMax)   { saveFanProfile(hwnd, FanMode::Max, {}, 0); return 0; }
             if (id == kIdBtnApplyCurve) { applyCurve(hwnd); return 0; }
             if (id == kIdBtnResetCurve) { g_curve = defaultCurve(); ::InvalidateRect(hwnd, nullptr, TRUE); return 0; }
             if (id == kIdTrayOpen) { showMainWindow(hwnd); return 0; }
-            if (id == kIdTrayFanAuto) { std::string e; if (!g_arc.fanSetAuto(e)) ::MessageBoxW(hwnd, widen(e).c_str(), L"Fan", MB_ICONWARNING); return 0; }
-            if (id == kIdTrayFanMax) { std::string e; if (!g_arc.fanSetFixed(100, e)) ::MessageBoxW(hwnd, widen(e).c_str(), L"Fan", MB_ICONWARNING); return 0; }
+            if (id == kIdTrayFanAuto) { saveFanProfile(hwnd, FanMode::Auto, {}, 0); return 0; }
+            if (id == kIdTrayFanMax) { saveFanProfile(hwnd, FanMode::Max, {}, 0); return 0; }
             if (id == kIdTrayExit) { g_reallyExit = true; ::DestroyWindow(hwnd); return 0; }
             return 0;
         }

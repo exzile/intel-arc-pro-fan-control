@@ -229,6 +229,18 @@ bool ArcController::fanSetCurve(const std::vector<FanPoint>& pts, std::string& e
                   return a.temperatureC < b.temperatureC;
               });
 
+    // Enforce a MONOTONIC (non-decreasing) speed curve. A point whose speed drops
+    // below a cooler point's (e.g. a mis-dragged GUI curve like 62:85 -> 65:24) is
+    // an invalid fan table: the driver can accept the SpeedTableMode call, silently
+    // ignore it, and leave the fan stuck in a no-control state until a driver reset.
+    // Clamp each speed up to the running maximum so the table is always valid.
+    int runningMax = 0;
+    for (FanPoint& p : sorted) {
+        if (static_cast<int>(p.speedPercent) < runningMax)
+            p.speedPercent = static_cast<decltype(p.speedPercent)>(runningMax);
+        runningMax = static_cast<int>(p.speedPercent);
+    }
+
     ctl_fan_speed_table_t table;
     zeroInit(table);
     table.numPoints = static_cast<int32_t>(sorted.size());

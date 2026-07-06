@@ -15,6 +15,7 @@
 //   arc-fan-service run         run in the foreground (debugging)
 //   (no args when launched by the Service Control Manager)
 #include <windows.h>
+#include <sddl.h>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -23,6 +24,8 @@
 #include "../config.hpp"
 #include "../apply.hpp"
 
+#pragma comment(lib, "advapi32.lib")
+
 using namespace arc;
 
 namespace {
@@ -30,9 +33,34 @@ namespace {
 const wchar_t* kServiceName = L"ArcFanControl";
 const wchar_t* kDisplayName = L"Arc Fan Control Service";
 
+// Named event the (non-elevated) GUI signals after it saves a new profile, so the
+// SYSTEM service re-applies it immediately. Global\ so it crosses sessions; a
+// permissive DACL lets a standard-user GUI open + signal it. This keeps the
+// SERVICE the single fan owner — the GUI never writes IGCL directly (a
+// non-elevated / invalid write there can silently lock the fan).
+const wchar_t* kApplyEventName = L"Global\\ArcFanControlApply";
+
 SERVICE_STATUS        g_status{};
 SERVICE_STATUS_HANDLE g_statusHandle = nullptr;
 HANDLE                g_stopEvent = nullptr;
+HANDLE                g_applyEvent = nullptr;
+
+// Create the apply event with a DACL granting Everyone EVENT_MODIFY_STATE (so the
+// non-elevated GUI can SetEvent it). Returns nullptr on failure (non-fatal).
+HANDLE createApplyEvent() {
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = FALSE;
+    // D: DACL; (A;;0x0002;;;WD) = Allow EVENT_MODIFY_STATE to Everyone (World).
+    if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:(A;;0x0002;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)", SDDL_REVISION_1,
+            &sa.lpSecurityDescriptor, nullptr)) {
+        return ::CreateEventW(nullptr, FALSE, FALSE, kApplyEventName);
+    }
+    HANDLE h = ::CreateEventW(&sa, FALSE /*auto-reset*/, FALSE, kApplyEventName);
+    ::LocalFree(sa.lpSecurityDescriptor);
+    return h;
+}
 
 // Re-apply cadence. Long enough to be unobtrusive, short enough to restore the
 // profile promptly after a driver reset / resume.
@@ -109,6 +137,8 @@ void runLoop() {
     // retry fast until the first success. No Intel service / waiver window is
     // needed -- fan and OC both work with the Intel service disabled once the
     // driver is ready and we hold fresh handles.
+    if (!g_applyEvent) g_applyEvent = createApplyEvent();
+
     auto ctl = std::make_unique<ArcController>();
     std::string err;
     bool inited = ctl->init(err);
@@ -126,10 +156,14 @@ void runLoop() {
             inited = ctl->init(err);
             if (!inited) logLine("re-init failed (will retry): " + err);
         }
-        // Poll fast until the profile has applied at least once, then relax.
+        // Poll fast until the profile has applied at least once, then relax. Wake
+        // early if the GUI signals the apply event after saving a new profile.
         const DWORD interval = everApplied ? kReapplyIntervalMs : kBootRetryMs;
-        const DWORD w = ::WaitForSingleObject(g_stopEvent, interval);
+        HANDLE waits[2] = { g_stopEvent, g_applyEvent };
+        const DWORD n = g_applyEvent ? 2u : 1u;
+        const DWORD w = ::WaitForMultipleObjects(n, waits, FALSE, interval);
         if (w == WAIT_OBJECT_0) break;     // stop requested
+        // WAIT_OBJECT_0+1 (apply now) or WAIT_TIMEOUT -> loop and re-apply.
     }
 }
 
