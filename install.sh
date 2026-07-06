@@ -50,4 +50,24 @@ if [ -f systemd/xe-gpu-vram.service ] && command -v systemctl >/dev/null 2>&1; t
   echo "  installed + enabled xe-gpu-vram.service (VRAM usage -> /run/xe-gpu-vram)"
 fi
 
+# B70 (Battlemage G31, 8086:e223) resizable-BAR workaround for Above-4G-less
+# platforms: the B70 POSTs a 32GB VRAM BAR that can't be mapped, so xe fails to
+# bind it. The service shrinks the BAR to 256MB and kexecs so the kernel
+# re-enumerates it (see docs/B70-G31-MULTI-GPU.md). Only enabled where a B70 is
+# present but unbound (i.e. actually affected); needs kexec-tools.
+if [ -f scripts/xe-b70-rebar-kexec.sh ] && command -v systemctl >/dev/null 2>&1; then
+  install -m755 scripts/xe-b70-rebar-kexec.sh /usr/local/sbin/xe-b70-rebar-kexec.sh
+  install -m644 systemd/xe-b70-rebar.service /etc/systemd/system/xe-b70-rebar.service
+  systemctl daemon-reload
+  b70="$(grep -il '^0xe223$' /sys/bus/pci/devices/*/device 2>/dev/null | head -1)"
+  if [ -n "$b70" ] && ! [ -e "$(dirname "$b70")/driver" ] && command -v kexec >/dev/null 2>&1; then
+    systemctl enable xe-b70-rebar.service 2>/dev/null || true
+    echo "  installed + enabled xe-b70-rebar.service (B70 e223 unbound: BAR-shrink + kexec on boot)"
+  elif [ -n "$b70" ] && ! command -v kexec >/dev/null 2>&1; then
+    echo "  installed xe-b70-rebar.service but NOT enabled: B70 present but kexec-tools missing (apt install kexec-tools)"
+  else
+    echo "  installed xe-b70-rebar.service (not enabled: no unbound B70/e223 detected)"
+  fi
+fi
+
 echo "install.sh: done. Launch 'Arc GPU Dashboard' from the apps menu, or run xe-gpu-gui."

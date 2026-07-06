@@ -1,0 +1,16 @@
+[Unit]
+Description=Shrink Arc Pro B70 resizable BAR and kexec to bind it (Above-4G-less platform workaround)
+Documentation=man:kexec(8)
+After=local-fs.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=display-manager.service graphical.target
+# The script self-gates on an unbound 8086:e223 (B70); skip on the post-kexec boot.
+ConditionKernelCommandLine=!xe_b70_kexeced=1
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/xe-b70-rebar-kexec.sh
+
+[Install]
+WantedBy=multi-user.target

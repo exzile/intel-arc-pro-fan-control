@@ -160,6 +160,25 @@ present pipeline, not the GPU).
 
 ---
 
+## 5b. Second card — Arc Pro B70 (Battlemage G31, `e223`)
+
+Adding a **B70** next to the B60 surfaced two die-specific facts — full writeup in
+[B70-G31-MULTI-GPU.md](B70-G31-MULTI-GPU.md):
+
+- **It wouldn't bind** on the Above-4G-less Z370 board: the B70 POSTs a **32 GB** VRAM BAR that can't
+  map below 4 GB (enabling Above-4G instead starved the **NVMe boot drive** → unbootable). Fix:
+  shrink the BAR to **256 MB** via its Resizable-BAR control reg, then **kexec** (which skips the
+  PCIe reset so the setting sticks). Made persistent by `xe-b70-rebar.service` (one-shot,
+  loop-guarded) + cmdline `pci=realloc=on xe.vram_bar_size=256 xe.max_vfs=0`.
+- **The G31 rejects the OC-write PCODE surface.** Fan control (op `0x7d`) and power/clock sysfs work,
+  but `0x5d` (VF curve), `0x5f/2` (begin) and `0x5e` (mem/temp) all return **`-71` (EPROTO)** where
+  the B60 accepts them — while the general mailbox works (`0x5c` cap reads the **same** `0x9`). So
+  the B70's OC uses a **different opcode set / firmware path**; it needs its own DTrace-on-Windows RE
+  pass (the B60 method doesn't port). A debug `oc/pcode_probe` sysfs was added to `xe_gt_oc.c` as the
+  bench for validating candidate sequences.
+
+---
+
 ## 6. Traps worth remembering
 - The `xe_gt_oc` GUI's CSS is a Python **bytes literal** (`b"""…"""`) → **ASCII only**; an em-dash or
   ✓/🔥 inside it is a `SyntaxError`. (Bit us three times.)
