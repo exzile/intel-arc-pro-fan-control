@@ -127,24 +127,32 @@ Its log is `%ProgramData%\ArcFanControl\service.log`.
 - **Units differ from Linux.** The Linux CLI uses PWM `0-255`; IGCL fan tables
   use **percent (0-100)**, so this port speaks percent. `fan_curve.hpp` has a
   `pwmToPercent()` helper if you're porting an old curve.
-- **Fan vs overclock is a hardware tradeoff — pick one.** The Intel Graphics
-  Software service is the precondition for the IGCL overclock waiver (with it
-  disabled, every OC write returns `UNSUPPORTED_FEATURE (0x4000000a)`). But that
-  same service also actively owns the GPU fan, so when it and our fan service both
-  run they fight over ownership — `canControl` flips to `no` and our curve gets
-  reverted to Intel's stock table.
+- **Fan + overclock CAN both be ours — the key is the waiver persists per boot.**
+  The Intel Graphics Software service is the precondition for the IGCL overclock
+  waiver: with it stopped, `ctlOverclockWaiverSet` returns `UNSUPPORTED_FEATURE
+  (0x4000000a)`. **But once the waiver is granted (service running once, as admin),
+  the driver keeps it until the next reboot** — you can then disable the Intel
+  service and OC still applies. And the Intel *service* does not need to keep
+  running for the fan: our fan curve owns the fan whenever the service is off. So
+  the winning pattern is a brief Intel-service window to grant the waiver, then
+  disable it and own both.
   - **Default = fan-priority:** `install.ps1` **disables** the Intel service so
     our fan curve applies reliably at boot. To overclock, run an *OC session*:
-    `windows\oc-session.ps1 -Oc 'freq 100','temp 95'` briefly re-enables the
-    service, applies the OC (which persists in hardware until the next reboot),
-    then disables it again so the fan curve keeps ownership.
-  - **OC-priority:** install with `-EnableOverclock` to leave the Intel service
-    running — OC works and persists, but Intel manages the fan (our custom curve
-    won't hold).
+    `windows\oc-session.ps1 -Oc 'freq 100','temp 95'` briefly enables the service
+    (granting the waiver), applies the OC, then disables it again. The OC stays
+    applied — and the fan curve keeps ownership — until the next reboot.
+  - **Why not leave the Intel service running?** While it runs it actively
+    contends the fan (`canControl` flips to `no`, our curve reverts to Intel
+    stock). Granting-then-disabling avoids the fight; `-EnableOverclock` at install
+    keeps it running if you prefer OC persistence over a custom fan curve.
+  - **Boot orchestration (planned):** the boot service will do the brief
+    Intel-window waiver-grant automatically at startup, so fan + OC are both live
+    after every boot with no manual OC session.
   - `ctlFanSetDefaultMode` ("true" hardware auto) is deliberately **not** used:
     it permanently relinquishes fan ownership for the driver session and the
-    public IGCL API cannot re-take it without a driver reset. `fan auto` instead
-    applies Intel's stock *curve* via table mode, keeping us in control.
+    public IGCL API cannot re-take it without a driver reset (reboot or
+    `pnputil /restart-device`). `fan auto` instead applies Intel's stock *curve*
+    via table mode, keeping us in control.
 - **Overclock warranty waiver.** IGCL requires accepting a warranty waiver
   before voltage / VF-curve writes; the tool sets it for you on those commands.
   Overclocking can reduce the part's lifetime — use at your own risk.

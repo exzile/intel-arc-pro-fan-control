@@ -22,7 +22,7 @@ The alternatives considered and why IGCL won:
 |---|---|---|---|
 | Fan curve | `pwm1_auto_point*` (patch 168027) | `ctlFanSetSpeedTableMode` | ✅ |
 | Fan full speed | `pwm1_enable=0` | `ctlFanSetFixedSpeedMode` 100% | ✅ |
-| Fan auto/stock | `pwm1_enable=2` | `ctlFanSetDefaultMode` | ✅ |
+| Fan auto/stock | `pwm1_enable=2` | Intel stock *curve* via `ctlFanSetSpeedTableMode` | ✅ (NOT `ctlFanSetDefaultMode` — see below) |
 | Fan RPM / % read | `fan1_input` / `pwm1` | `ctlFanGetState` | ✅ |
 | VF curve read/write | `xe_gt_oc` `0x5f/0x5d` transaction | `ctlOverclockRead/WriteCustomVFCurve` | ✅ |
 | GPU freq offset | (n/a — Linux used min/max clamps) | `ctlOverclockGpuFrequencyOffsetSetV2` | ✅ |
@@ -50,10 +50,36 @@ The alternatives considered and why IGCL won:
 - **GPU clock tuning is offset-based** (IGCL exposes a frequency *offset*, not
   the min/max clamp the Linux `xe-gpu-tune --clk-min/--clk-max` used). Power and
   temperature limits map directly.
-- **The B70/G31 gap may not exist here.** On Linux the G31 rejected the private
-  PCODE OC opcodes (`-EPROTO`); IGCL routes through the vendor driver, so if the
-  Windows Arc Control app can tune the card, these same calls should too. To be
-  confirmed on hardware — `ctlOverclockGetProperties().bSupported` reports it.
+- **The B70/G31 OC gap is real on Windows too — confirmed.** The G31 firmware
+  gates overclocking at the PCODE level regardless of OS, and Intel's own Windows
+  Arc Control app exposes **no tuning section** for the B70. Only the **B60/G21**
+  is overclockable here. Fan control works on both.
+
+## OC ownership & the warranty waiver (Windows-specific)
+
+Overclocking on Windows has two gotchas the Linux side never had:
+
+- **The waiver is the real gate — and it PERSISTS per boot.** All `ctlOverclock*`
+  setters require `ctlOverclockWaiverSet` to have succeeded first, else they fail
+  with `DATA_WRITE`. The waiver only succeeds while the **Intel Graphics Software
+  service** is running (as admin). But once granted, the driver keeps the waiver
+  until the next reboot — so you can grant it via a brief Intel-service window,
+  disable the service, and OC still applies. `install.ps1` is fan-priority by
+  default; `windows\oc-session.ps1` opens that brief window on demand.
+- **The Intel service contends the fan while running**, so we grant-then-disable
+  rather than leave it up. From a clean boot our fan curve owns the fan whenever
+  the service is off.
+- **`ctlFanSetDefaultMode` is banned.** It permanently relinquishes fan ownership
+  for the driver session; the public IGCL fan API then returns SUCCESS but
+  silently no-ops on every table write until a driver reset (reboot or
+  `pnputil /restart-device`). `fanSetAuto` applies Intel's stock *curve* via table
+  mode instead, so we never lose ownership.
+- **Under the hood** both fan and OC ride the same private DXGK escape `0x80c`
+  (Type=0 driver-private, dispatched by `IntelControlLib.dll`); the kernel does
+  not gate it, only the userspace waiver + persisted-waiver state do. The full
+  wire format and the OC param map (`0x2f` freq, `0x36` temp, `0x30` power, `0x32`
+  volt, `0x33` mem, `0x25` reset, `0x29` waiver) were reverse-engineered but are
+  **not needed** given the persisted-waiver approach above.
 
 ## Roadmap (next)
 
@@ -69,6 +95,14 @@ The alternatives considered and why IGCL won:
 6. **Installer** — 🟡 partial: a PowerShell `install.ps1`/`uninstall.ps1` copies
    the binaries, creates the ProgramData dir, registers/starts the service, and
    adds a Start-Menu shortcut. A signed MSI/WiX package is still a nice-to-have.
+7. **Boot-time OC waiver orchestration** — ⬜ planned: have `arc-fan-service`
+   briefly enable the Intel service at startup to grant the OC waiver, apply the
+   saved overclock, then disable it and apply the fan curve — so fan + OC are both
+   live after every boot with no manual `oc-session.ps1`. (`oc-session.ps1` covers
+   the manual path today.)
+8. **System-tray GUI** — ✅ `arc-gpu-gui --tray`: notification-area icon that
+   opens the dashboard (left/double-click) with an Auto/Max/Exit menu
+   (right-click); auto-starts at login.
 
 ## Testability note
 
