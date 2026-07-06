@@ -137,7 +137,10 @@ int installService() {
     SC_HANDLE scm = ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
     if (!scm) { std::fprintf(stderr, "OpenSCManager failed (%lu). Run as Administrator.\n", GetLastError()); return 1; }
 
-    const std::wstring cmd = L"\"" + exePath() + L"\" run";
+    // Register with NO argument: launched by the SCM, wmain must fall through to
+    // StartServiceCtrlDispatcher (the "run" arg is the foreground DEBUG path and
+    // never reports RUNNING to the SCM -> 30s connect timeout / SCM kills it).
+    const std::wstring cmd = L"\"" + exePath() + L"\"";
     SC_HANDLE svc = ::CreateServiceW(
         scm, kServiceName, kDisplayName, SERVICE_ALL_ACCESS,
         SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
@@ -145,8 +148,19 @@ int installService() {
     int rc = 0;
     if (!svc) {
         const DWORD e = GetLastError();
-        if (e == ERROR_SERVICE_EXISTS) std::printf("Service already installed.\n");
-        else { std::fprintf(stderr, "CreateService failed (%lu).\n", e); rc = 1; }
+        if (e == ERROR_SERVICE_EXISTS) {
+            // Already registered (maybe with the old buggy bin path): update it.
+            SC_HANDLE ex = ::OpenServiceW(scm, kServiceName, SERVICE_CHANGE_CONFIG | SERVICE_START);
+            if (ex) {
+                ::ChangeServiceConfigW(ex, SERVICE_NO_CHANGE, SERVICE_AUTO_START,
+                    SERVICE_NO_CHANGE, cmd.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+                std::printf("Service already installed; updated config + (re)starting.\n");
+                ::StartServiceW(ex, 0, nullptr);
+                ::CloseServiceHandle(ex);
+            } else {
+                std::printf("Service already installed.\n");
+            }
+        } else { std::fprintf(stderr, "CreateService failed (%lu).\n", e); rc = 1; }
     } else {
         std::printf("Installed '%ls' (auto-start).\n", kDisplayName);
         ::StartServiceW(svc, 0, nullptr);   // start immediately
