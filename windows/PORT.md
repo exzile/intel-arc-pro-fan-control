@@ -55,20 +55,26 @@ The alternatives considered and why IGCL won:
   Arc Control app exposes **no tuning section** for the B70. Only the **B60/G21**
   is overclockable here. Fan control works on both.
 
-## OC ownership & the warranty waiver (Windows-specific)
+## OC ownership & the Intel service (Windows-specific)
 
-Overclocking on Windows has two gotchas the Linux side never had:
+Overclocking on Windows has a few gotchas the Linux side never had — but the net
+result is simple: **we own both fan and OC with the Intel service disabled.**
 
-- **The waiver is the real gate — and it PERSISTS per boot.** All `ctlOverclock*`
-  setters require `ctlOverclockWaiverSet` to have succeeded first, else they fail
-  with `DATA_WRITE`. The waiver only succeeds while the **Intel Graphics Software
-  service** is running (as admin). But once granted, the driver keeps the waiver
-  until the next reboot — so you can grant it via a brief Intel-service window,
-  disable the service, and OC still applies. `install.ps1` is fan-priority by
-  default; `windows\oc-session.ps1` opens that brief window on demand.
-- **The Intel service contends the fan while running**, so we grant-then-disable
-  rather than leave it up. From a clean boot our fan curve owns the fan whenever
-  the service is off.
+- **OC does NOT need the Intel service.** `ctlOverclock*` setters need
+  `ctlOverclockWaiverSet` to succeed first, and that just needs an **admin process
+  against a ready driver** — our SYSTEM boot service provides exactly that. The
+  earlier belief that OC required the Intel service was a red herring: those
+  `0x4000000a` failures were a **not-ready driver at cold boot** or a **thrashed
+  driver state** from mode-switching, not a missing service. Verified: from a
+  clean boot with the Intel service stopped+disabled, both the service and an
+  elevated `arc-gpu oc …` apply OC successfully.
+- **The Intel service contends the fan**, so it stays disabled. When it runs,
+  `canControl` flips to `no` and our curve reverts to Intel's stock table.
+- **Cold-boot readiness (the actual fix).** The service can start before the GPU
+  driver has initialized; its first `init()` then holds stale handles and every
+  apply fails. `runLoop` now **re-initializes a fresh controller on any apply
+  failure and retries every 5 s until the first success**, then relaxes to 60 s —
+  so fan + OC land reliably shortly after boot.
 - **`ctlFanSetDefaultMode` is banned.** It permanently relinquishes fan ownership
   for the driver session; the public IGCL fan API then returns SUCCESS but
   silently no-ops on every table write until a driver reset (reboot or
@@ -76,10 +82,10 @@ Overclocking on Windows has two gotchas the Linux side never had:
   mode instead, so we never lose ownership.
 - **Under the hood** both fan and OC ride the same private DXGK escape `0x80c`
   (Type=0 driver-private, dispatched by `IntelControlLib.dll`); the kernel does
-  not gate it, only the userspace waiver + persisted-waiver state do. The full
-  wire format and the OC param map (`0x2f` freq, `0x36` temp, `0x30` power, `0x32`
-  volt, `0x33` mem, `0x25` reset, `0x29` waiver) were reverse-engineered but are
-  **not needed** given the persisted-waiver approach above.
+  not gate it. The full wire format and the OC param map (`0x2f` freq, `0x36`
+  temp, `0x30` power, `0x32` volt, `0x33` mem, `0x25` reset, `0x29` waiver) were
+  reverse-engineered but are **not needed** — the public IGCL path works with
+  Intel disabled once the driver is ready.
 
 ## Roadmap (next)
 
@@ -95,11 +101,12 @@ Overclocking on Windows has two gotchas the Linux side never had:
 6. **Installer** — 🟡 partial: a PowerShell `install.ps1`/`uninstall.ps1` copies
    the binaries, creates the ProgramData dir, registers/starts the service, and
    adds a Start-Menu shortcut. A signed MSI/WiX package is still a nice-to-have.
-7. **Boot-time OC waiver orchestration** — ⬜ planned: have `arc-fan-service`
-   briefly enable the Intel service at startup to grant the OC waiver, apply the
-   saved overclock, then disable it and apply the fan curve — so fan + OC are both
-   live after every boot with no manual `oc-session.ps1`. (`oc-session.ps1` covers
-   the manual path today.)
+7. **Cold-boot readiness** — ✅ `arc-fan-service` re-initializes a fresh controller
+   on any apply failure and retries every 5 s until the first success, then relaxes
+   to 60 s. Handles the service starting before the GPU driver is ready (and driver
+   resets), so fan + OC both land reliably after every boot with the Intel service
+   disabled. (No Intel-service window or waiver orchestration needed — OC works
+   Intel-off once the driver is ready.)
 8. **System-tray GUI** — ✅ `arc-gpu-gui --tray`: notification-area icon that
    opens the dashboard (left/double-click) with an Auto/Max/Exit menu
    (right-click); auto-starts at login.

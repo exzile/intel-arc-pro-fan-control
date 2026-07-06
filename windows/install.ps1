@@ -11,32 +11,29 @@
 #   -BuildDir <path>       where the .exe files are (default: build\Release)
 #   -NoService             copy binaries but don't register the service
 #   -AddToPath             add the install dir to the system PATH
-#   -EnableOverclock       OC-priority: leave Intel's service ENABLED (see below)
+#   -KeepIntelService      leave Intel's Graphics Software service running (its
+#                          Arc Control app keeps working, but it CONTENDS the fan)
 #
-# FAN vs OVERCLOCK - a hardware tradeoff you must pick:
-#   The Intel Graphics Software service is REQUIRED for overclocking (it is the
-#   precondition for ctlOverclockWaiverSet; without it every OC write returns
-#   UNSUPPORTED_FEATURE 0x4000000a). BUT that same service also actively owns the
-#   GPU fan, and it CONTENDS our fan service - with both running they fight over
-#   fan ownership (canControl flips to no, our curve gets reverted to Intel stock).
+# INTEL SERVICE: disabled by default, and you want it that way.
+#   The Intel Graphics Software service actively owns the GPU fan, so if it runs
+#   alongside our fan service they fight over ownership (canControl flips to no,
+#   our curve gets reverted to Intel's stock table). With it DISABLED, our service
+#   owns BOTH the fan and overclocking - overclocking does NOT require the Intel
+#   service (it only requires an admin process + a ready driver, which our SYSTEM
+#   service provides at boot). So this installer disables it by default.
 #
-#   DEFAULT = FAN-PRIORITY: this installer DISABLES the Intel service so our fan
-#   curve applies reliably at boot. Overclocking is then unavailable until you run
-#   an "OC session" (windows\oc-session.ps1) which briefly re-enables the service,
-#   applies the OC, and it persists in hardware until the next reboot.
-#
-#   -EnableOverclock = OC-PRIORITY: leaves the Intel service enabled so OC works
-#   and persists, but our custom fan curve will NOT hold (Intel manages the fan).
+#   -KeepIntelService leaves it running only if you still want Intel's Arc Control
+#   app/telemetry; expect the custom fan curve not to hold while it runs.
 [CmdletBinding()]
 param(
     [string]$BuildDir = (Join-Path $PSScriptRoot 'build\Release'),
     [switch]$NoService,
     [switch]$AddToPath,
-    [switch]$EnableOverclock
+    [switch]$KeepIntelService
 )
 
-# Intel's service owns the fan AND gates overclocking. Disabled by default so our
-# fan curve wins; -EnableOverclock keeps it for OC at the cost of fan ownership.
+# Intel's service contends the fan. Disabled by default so our service owns fan +
+# OC; -KeepIntelService leaves it for the Intel app at the cost of fan ownership.
 $IntelOwnerServices = @('IntelGraphicsSoftwareService', 'IGSDSserviceDiscrete')
 
 $ErrorActionPreference = 'Stop'
@@ -108,37 +105,25 @@ try {
     Write-Warning "Could not register tray auto-start: $_"
 }
 
-if (-not $EnableOverclock) {
-    # FAN-PRIORITY (default): disable the Intel service so it stops contending our
-    # fan curve. This also disables overclocking until an OC session re-enables it
-    # (windows\oc-session.ps1). Our boot service then owns the fan cleanly.
+if (-not $KeepIntelService) {
+    # Default: disable the Intel service so it stops contending our fan curve. Our
+    # SYSTEM service then owns BOTH the fan and overclocking (OC does not need the
+    # Intel service - only admin + a ready driver, which the service has at boot).
     foreach ($svc in $IntelOwnerServices) {
         $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
         if (-not $s) { continue }
         try {
             if ($s.Status -ne 'Stopped') { Stop-Service -Name $svc -Force -ErrorAction Stop }
             Set-Service -Name $svc -StartupType Disabled -ErrorAction Stop
-            Write-Host "Disabled '$($s.DisplayName)' ($svc) - fan-priority; run oc-session.ps1 to overclock."
+            Write-Host "Disabled '$($s.DisplayName)' ($svc) - our service now owns fan + overclock."
         } catch {
             Write-Warning "Could not disable ${svc}: $_"
         }
     }
 } else {
-    # OC-PRIORITY: leave the Intel service enabled (OC works + persists), at the
-    # cost of a reliable custom fan curve (Intel manages the fan while it runs).
-    foreach ($svc in $IntelOwnerServices) {
-        $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
-        if (-not $s) { continue }
-        try {
-            $startType = if ($svc -eq 'IntelGraphicsSoftwareService') { 'Automatic' } else { 'Manual' }
-            Set-Service -Name $svc -StartupType $startType -ErrorAction Stop
-            if ($s.Status -ne 'Running') { Start-Service -Name $svc -ErrorAction SilentlyContinue }
-            Write-Host "Left '$($s.DisplayName)' ($svc) enabled - OC available; custom fan curve may not hold."
-        } catch {
-            Write-Warning "Could not enable ${svc}: $_"
-        }
-    }
-    Write-Warning 'OC-priority mode: the Intel service will contend the fan; our custom curve may be reverted to Intel stock.'
+    # Leave the Intel service running (only for its Arc Control app). It will
+    # contend the fan, so our custom curve may not hold while it runs.
+    Write-Warning '-KeepIntelService: the Intel service will contend the fan; our custom curve may be reverted to Intel stock. OC works either way.'
 }
 
 if (-not $NoService) {

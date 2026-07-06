@@ -16,6 +16,7 @@
 //   (no args when launched by the Service Control Manager)
 #include <windows.h>
 #include <cstdio>
+#include <memory>
 #include <string>
 
 #include "../arc.hpp"
@@ -36,6 +37,12 @@ HANDLE                g_stopEvent = nullptr;
 // Re-apply cadence. Long enough to be unobtrusive, short enough to restore the
 // profile promptly after a driver reset / resume.
 constexpr DWORD kReapplyIntervalMs = 60'000;
+
+// Cold boot: the service can start before the GPU driver has finished
+// initializing (IGCL then returns NOT_READY-class errors and every fan/OC write
+// fails). Retry quickly until the first successful apply, then settle to the
+// normal cadence.
+constexpr DWORD kBootRetryMs = 5'000;
 
 void logLine(const std::string& msg) {
     ::OutputDebugStringA(("[ArcFanControl] " + msg + "\n").c_str());
@@ -95,14 +102,33 @@ DWORD WINAPI ServiceCtrlHandler(DWORD ctrl, DWORD, LPVOID, LPVOID) {
 }
 
 void runLoop() {
-    // Init IGCL ONCE and hold it for the service lifetime (owns the fan on a
-    // clean boot driver state); re-init only if an apply fails (driver reset).
-    ArcController a;
+    // The controller owns the IGCL/Level-Zero handles. It is normally held for the
+    // service lifetime, but a controller initialized against a not-yet-ready driver
+    // (cold boot) or invalidated by a driver reset keeps failing forever with stale
+    // handles. So: RE-INITIALIZE a fresh controller whenever an apply fails, and
+    // retry fast until the first success. No Intel service / waiver window is
+    // needed -- fan and OC both work with the Intel service disabled once the
+    // driver is ready and we hold fresh handles.
+    auto ctl = std::make_unique<ArcController>();
     std::string err;
-    if (!a.init(err)) { logLine("init failed: " + err); return; }
+    bool inited = ctl->init(err);
+    if (!inited) logLine("init failed (will retry): " + err);
+
+    bool everApplied = false;
     for (;;) {
-        applyOnce(a);   // re-assert the profile each cycle (the HW curve persists regardless)
-        const DWORD w = ::WaitForSingleObject(g_stopEvent, kReapplyIntervalMs);
+        bool ok = inited && applyOnce(*ctl);
+        if (ok) {
+            everApplied = true;
+        } else {
+            // Fresh handles: recover from cold-boot-not-ready or a driver reset.
+            logLine("re-initializing controller (apply failed / driver not ready)");
+            ctl = std::make_unique<ArcController>();
+            inited = ctl->init(err);
+            if (!inited) logLine("re-init failed (will retry): " + err);
+        }
+        // Poll fast until the profile has applied at least once, then relax.
+        const DWORD interval = everApplied ? kReapplyIntervalMs : kBootRetryMs;
+        const DWORD w = ::WaitForSingleObject(g_stopEvent, interval);
         if (w == WAIT_OBJECT_0) break;     // stop requested
     }
 }
