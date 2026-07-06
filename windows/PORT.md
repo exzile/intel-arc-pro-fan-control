@@ -66,8 +66,9 @@ The alternatives considered and why IGCL won:
    editor tab from the Linux GUI (use `arc-gpu oc` meanwhile).
 5. **Stability test** — a fan-guarded GPU load with auto-revert, porting
    `xe-gpu-stress`.
-6. **Installer** — MSI/WiX that fetches nothing, drops the binaries, creates the
-   ProgramData profile with a sane ACL, and registers the service.
+6. **Installer** — 🟡 partial: a PowerShell `install.ps1`/`uninstall.ps1` copies
+   the binaries, creates the ProgramData dir, registers/starts the service, and
+   adds a Start-Menu shortcut. A signed MSI/WiX package is still a nice-to-have.
 
 ## Testability note
 

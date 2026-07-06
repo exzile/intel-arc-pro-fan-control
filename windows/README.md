@@ -26,6 +26,7 @@ See [PORT.md](PORT.md) for the full capability map and roadmap.
 ```
 windows/
   CMakeLists.txt              build (MSVC / clang-cl, C++17)
+  install.ps1 / uninstall.ps1 install the tools + register the service
   third_party/igcl/           drop igcl_api.h here (not vendored — see its README)
   src/
     igcl.hpp / igcl.cpp       dynamic ControlLib.dll loader
@@ -53,6 +54,10 @@ cd windows
 cmake -B build -A x64
 cmake --build build --config Release
 # -> build/Release/arc-gpu.exe, arc-fan-service.exe, arc-gpu-gui.exe
+
+# 3. (optional) install to Program Files + register the service (elevated)
+powershell -ExecutionPolicy Bypass -File install.ps1 -AddToPath
+#   ...later: powershell -ExecutionPolicy Bypass -File uninstall.ps1
 ```
 
 ## Desktop dashboard — `arc-gpu-gui`
