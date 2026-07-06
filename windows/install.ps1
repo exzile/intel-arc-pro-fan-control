@@ -61,6 +61,9 @@ foreach ($b in $Binaries) {
 # ProgramData config dir (the service + tools read %ProgramData%\ArcFanControl).
 $DataDir = Join-Path $env:ProgramData 'ArcFanControl'
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+# Grant standard users Modify so the non-elevated CLI/GUI can save profiles that
+# the SYSTEM service reads (S-1-5-32-545 = BUILTIN\Users; /T covers existing files).
+& icacls "$DataDir" /grant '*S-1-5-32-545:(OI)(CI)M' /T /C 2>&1 | Out-Null
 
 if ($AddToPath) {
     $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
