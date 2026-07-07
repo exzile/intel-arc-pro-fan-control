@@ -1,6 +1,7 @@
 # Build output
 build/
 out/
+installer/output/
 *.obj
 *.exe
 *.pdb

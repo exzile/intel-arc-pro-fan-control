@@ -17,9 +17,19 @@ boot **service** that re-applies your profile — built on Intel's own
 
 ## Status
 
-This is the **first cut** of the port: the IGCL core, the `arc-gpu` CLI, and the
-`arc-fan-service` boot service are implemented. A native GUI is not ported yet.
-See [PORT.md](PORT.md) for the full capability map and roadmap.
+The port is functional: the IGCL core, the `arc-gpu` CLI, the `arc-fan-service`
+boot service, and a native **Win32 GUI** (Dashboard / Fan / Overclock tabs, with
+a draggable fan curve and voltage-frequency curve editor) are all implemented,
+plus a one-click **Windows installer**. See [PORT.md](PORT.md) for the full
+capability map and roadmap.
+
+## Install (end users)
+
+Grab **`ArcGpuControl-Setup.exe`** from the Releases page and run it (it needs
+Administrator to register the boot service). That installs the tools + service,
+adds the tray app to your login, and re-applies your fan curve + overclock at
+every boot. Maintainers build the installer with
+[`installer/build-installer.ps1`](installer/README.md).
 
 ## Layout
 

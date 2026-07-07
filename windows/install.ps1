@@ -61,7 +61,11 @@ foreach ($b in $Binaries) {
 
 Write-Host "Installing to $InstallDir ..."
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+# When run by the Inno Setup installer the binaries are already in place (BuildDir
+# == InstallDir); skip the self-copy in that case.
+$sameDir = ((Resolve-Path $BuildDir).Path.TrimEnd('\') -ieq (Resolve-Path $InstallDir).Path.TrimEnd('\'))
 foreach ($b in $Binaries) {
+    if ($sameDir) { continue }
     Copy-Item -Force (Join-Path $BuildDir $b) (Join-Path $InstallDir $b)
 }
 
