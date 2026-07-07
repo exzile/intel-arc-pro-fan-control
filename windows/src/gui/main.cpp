@@ -23,6 +23,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <deque>
+#include <map>
 
 #include "../arc.hpp"
 #include "../config.hpp"
@@ -52,6 +54,8 @@ enum : int {
     kIdBtnResetOc = 1010,
     kIdCbPreset = 1011,
     kIdChkCurve = 1012,
+    kIdBtnMetrics = 1013,
+    kMetricMenuBase = 1300,   // metric-toggle menu item ids: base + index
     // Overclock sliders (trackbars). Order matches g_oc[].
     kIdTbFreq = 1020,
     kIdTbVolt = 1021,
@@ -125,6 +129,14 @@ Telemetry  g_prev;
 Metrics    g_metrics;
 int        g_fanPct = -1;
 MemoryInfo g_mem;
+
+// Dashboard metric history (rolling, for the per-tile line graphs) + visibility
+// (toggled from the "Metrics" dropdown). Keyed by metric id.
+constexpr size_t kHistLen = 120;                         // ~2 min at 1s
+std::map<std::string, std::deque<float>> g_hist;
+std::map<std::string, bool> g_metricVis;                 // missing => visible
+HWND g_btnMetrics = nullptr;
+std::vector<std::string> g_menuMetricIds;                // popup item index -> metric id
 std::string g_deviceLine;
 
 std::vector<FanPoint> g_curve;   // editor working copy
@@ -217,6 +229,8 @@ void loadEditorCurve() {
               [](const FanPoint& a, const FanPoint& b) { return a.temperatureC < b.temperatureC; });
 }
 
+void updateMetricHistory();   // defined below (used by tick)
+
 void tick() {
     if (!g_ready) return;
     Telemetry cur;
@@ -229,35 +243,124 @@ void tick() {
     if (g_arc.fanGetPercent(pct, err)) g_fanPct = pct;
     MemoryInfo mem;
     if (g_arc.readMemory(mem, err)) g_mem = mem;
+    updateMetricHistory();   // feed the per-tile line graphs
 }
 
 // --- dashboard painting ------------------------------------------------------
 
-struct Tile { std::string label, value, sub; double pct; bool hasPct; };
+struct Tile {
+    std::string id, label, value, sub;
+    double pct = 0; bool hasPct = false;
+    double hist = 0; bool hasHist = false;   // current numeric value fed to the line graph
+};
 
+// Every available metric tile with its current value (the master list; the
+// dropdown filters which are drawn, and history is tracked for each hasHist one).
+std::vector<Tile> buildMetricRows() {
+    const Metrics& m = g_metrics;
+    std::vector<Tile> t;
+    t.push_back({"clock", "GPU CLOCK", fmt("%.0f", m.gpuFreqMHz) + " MHz", "", 0, false, m.gpuFreqMHz, true});
+    if (m.hasCardPower)
+        t.push_back({"power", "CARD POWER", fmt("%.0f", m.cardPowerW) + " W",
+                     m.hasGpuPower ? fmt("%.0f", m.gpuPowerW) + " W GPU" : "", 0, false, m.cardPowerW, true});
+    t.push_back({"temp", "GPU TEMP", fmt("%.0f", m.gpuTempC) + " C",
+                 m.vramTempC > 0 ? fmt("%.0f", m.vramTempC) + " C VRAM" : "", 0, false, m.gpuTempC, true});
+    if (m.hasGpuUtil)
+        t.push_back({"util", "GPU UTIL", fmt("%.0f", m.gpuUtilPct) + " %", "", m.gpuUtilPct, true, m.gpuUtilPct, true});
+    {
+        std::string v = (g_fanPct >= 0) ? std::to_string(g_fanPct) + " %" : fmt("%.0f", m.fanRpm) + " RPM";
+        std::string sub = (g_fanPct >= 0) ? fmt("%.0f", m.fanRpm) + " RPM" : "";
+        t.push_back({"fan", "FAN", v, sub, (g_fanPct >= 0) ? (double)g_fanPct : 0, g_fanPct >= 0, m.fanRpm, true});
+    }
+    if (g_mem.totalBytes > 0) {
+        const double gib = 1024.0 * 1024.0 * 1024.0;
+        double pctUsed = 100.0 * g_mem.usedBytes / g_mem.totalBytes;
+        t.push_back({"vram", "VRAM", fmt("%.1f", g_mem.usedBytes / gib) + " GiB",
+                     "of " + fmt("%.1f", g_mem.totalBytes / gib) + " GiB", pctUsed, true, pctUsed, true});
+    }
+    if (m.gpuVoltageV > 0)
+        t.push_back({"voltage", "GPU VOLTAGE", fmt("%.0f", m.gpuVoltageV * 1000.0) + " mV", "", 0, false, m.gpuVoltageV * 1000.0, true});
+    if (m.hasRenderUtil)
+        t.push_back({"render", "RENDER UTIL", fmt("%.0f", m.renderUtilPct) + " %", "", m.renderUtilPct, true, m.renderUtilPct, true});
+    if (m.hasMediaUtil)
+        t.push_back({"media", "MEDIA UTIL", fmt("%.0f", m.mediaUtilPct) + " %", "", m.mediaUtilPct, true, m.mediaUtilPct, true});
+    if (m.hasVramReadBw || m.hasVramWriteBw)
+        t.push_back({"bw", "VRAM BANDWIDTH",
+                     fmt("%.1f", (m.vramReadBwMBps + m.vramWriteBwMBps) / 1024.0) + " GB/s",
+                     fmt("%.0f", m.vramReadBwMBps) + " R / " + fmt("%.0f", m.vramWriteBwMBps) + " W MB/s",
+                     0, false, (m.vramReadBwMBps + m.vramWriteBwMBps) / 1024.0, true});
+    {
+        std::string lim;
+        if (m.powerLimited)   lim += "power ";
+        if (m.tempLimited)    lim += "temp ";
+        if (m.voltageLimited) lim += "voltage ";
+        if (m.currentLimited) lim += "current ";
+        if (m.utilLimited)    lim += "util ";
+        t.push_back({"throttle", "THROTTLE", lim.empty() ? "none" : lim, "", 0, false, 0, false});
+    }
+    return t;
+}
+
+// Push the current value of every metric into its rolling history (called 1/s).
+void updateMetricHistory() {
+    for (const Tile& t : buildMetricRows()) {
+        if (!t.hasHist) continue;
+        auto& h = g_hist[t.id];
+        h.push_back((float)t.hist);
+        while (h.size() > kHistLen) h.pop_front();
+    }
+}
+
+bool metricVisible(const std::string& id) {
+    auto it = g_metricVis.find(id);
+    return it == g_metricVis.end() ? true : it->second;   // default visible
+}
+
+// A tile: label, big value, sub-line, an optional %% bar, and a rolling line
+// graph of its recent history along the bottom.
 void drawTile(HDC dc, const RECT& r, const Tile& t) {
     HBRUSH bg = ::CreateSolidBrush(RGB(32, 34, 40));
-    ::FillRect(dc, &r, bg);
-    ::DeleteObject(bg);
+    ::FillRect(dc, &r, bg); ::DeleteObject(bg);
     ::SetBkMode(dc, TRANSPARENT);
 
-    RECT lr = r; lr.left += 14; lr.top += 10;
+    RECT lr = r; lr.left += 14; lr.top += 9;
     ::SetTextColor(dc, RGB(150, 156, 168));
     ::SelectObject(dc, g_fontLabel);
     ::DrawTextW(dc, widen(t.label).c_str(), -1, &lr, DT_LEFT | DT_TOP | DT_SINGLELINE);
 
-    RECT vr = r; vr.left += 14; vr.top += 34;
+    RECT vr = r; vr.left += 14; vr.top += 30;
     ::SetTextColor(dc, RGB(232, 236, 244));
     ::SelectObject(dc, g_fontValue);
     ::DrawTextW(dc, widen(t.value).c_str(), -1, &vr, DT_LEFT | DT_TOP | DT_SINGLELINE);
 
     if (!t.sub.empty()) {
-        RECT sr = r; sr.left += 14; sr.bottom -= 10;
+        RECT sr = r; sr.left += 14; sr.top += 62; sr.bottom = sr.top + 16;
         ::SetTextColor(dc, RGB(150, 156, 168));
         ::SelectObject(dc, g_fontLabel);
-        ::DrawTextW(dc, widen(t.sub).c_str(), -1, &sr, DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
+        ::DrawTextW(dc, widen(t.sub).c_str(), -1, &sr, DT_LEFT | DT_TOP | DT_SINGLELINE);
     }
-    if (t.hasPct) {
+
+    // Line graph of the history along the bottom band.
+    if (t.hasHist) {
+        auto it = g_hist.find(t.id);
+        if (it != g_hist.end() && it->second.size() >= 2) {
+            const std::deque<float>& h = it->second;
+            float lo = h[0], hi = h[0];
+            for (float v : h) { lo = std::min(lo, v); hi = std::max(hi, v); }
+            if (hi <= lo) hi = lo + 1.0f;
+            RECT gr{r.left + 14, r.bottom - 26, r.right - 14, r.bottom - 8};
+            const int gw = gr.right - gr.left, gh = gr.bottom - gr.top;
+            const bool hot = t.hasPct && t.pct >= 90;
+            HPEN pen = ::CreatePen(PS_SOLID, 2, hot ? RGB(220, 90, 80) : RGB(80, 150, 220));
+            HGDIOBJ op = ::SelectObject(dc, pen);
+            for (size_t i = 0; i < h.size(); ++i) {
+                int x = gr.left + (int)((long long)gw * i / (h.size() - 1));
+                int y = gr.bottom - (int)((h[i] - lo) / (hi - lo) * gh);
+                if (i == 0) ::MoveToEx(dc, x, y, nullptr); else ::LineTo(dc, x, y);
+            }
+            ::SelectObject(dc, op); ::DeleteObject(pen);
+        }
+    } else if (t.hasPct) {
         RECT br = r; br.left += 14; br.right -= 14; br.bottom -= 14; br.top = br.bottom - 6;
         HBRUSH track = ::CreateSolidBrush(RGB(52, 55, 63));
         ::FillRect(dc, &br, track); ::DeleteObject(track);
@@ -269,51 +372,13 @@ void drawTile(HDC dc, const RECT& r, const Tile& t) {
 }
 
 void paintDashboard(HDC dc, const RECT& client) {
-    const Metrics& m = g_metrics;
+    std::vector<Tile> all = buildMetricRows();
     std::vector<Tile> tiles;
-    tiles.push_back({"GPU CLOCK", fmt("%.0f", m.gpuFreqMHz) + " MHz", "", 0, false});
-    if (m.hasCardPower)
-        tiles.push_back({"CARD POWER", fmt("%.0f", m.cardPowerW) + " W",
-                         m.hasGpuPower ? fmt("%.0f", m.gpuPowerW) + " W GPU" : "", 0, false});
-    tiles.push_back({"GPU TEMP", fmt("%.0f", m.gpuTempC) + " C",
-                     m.vramTempC > 0 ? fmt("%.0f", m.vramTempC) + " C VRAM" : "", 0, false});
-    if (m.hasGpuUtil)
-        tiles.push_back({"GPU UTIL", fmt("%.0f", m.gpuUtilPct) + " %", "", m.gpuUtilPct, true});
-    {
-        std::string v = (g_fanPct >= 0) ? std::to_string(g_fanPct) + " %" : fmt("%.0f", m.fanRpm) + " RPM";
-        std::string sub = (g_fanPct >= 0) ? fmt("%.0f", m.fanRpm) + " RPM" : "";
-        tiles.push_back({"FAN", v, sub, (g_fanPct >= 0) ? (double)g_fanPct : 0, g_fanPct >= 0});
-    }
-    if (g_mem.totalBytes > 0) {
-        const double gib = 1024.0 * 1024.0 * 1024.0;
-        double pctUsed = 100.0 * g_mem.usedBytes / g_mem.totalBytes;
-        tiles.push_back({"VRAM", fmt("%.1f", g_mem.usedBytes / gib) + " GiB",
-                         "of " + fmt("%.1f", g_mem.totalBytes / gib) + " GiB", pctUsed, true});
-    }
-    if (m.gpuVoltageV > 0)
-        tiles.push_back({"GPU VOLTAGE", fmt("%.0f", m.gpuVoltageV * 1000.0) + " mV", "", 0, false});
-    if (m.hasRenderUtil)
-        tiles.push_back({"RENDER UTIL", fmt("%.0f", m.renderUtilPct) + " %", "", m.renderUtilPct, true});
-    if (m.hasMediaUtil)
-        tiles.push_back({"MEDIA UTIL", fmt("%.0f", m.mediaUtilPct) + " %", "", m.mediaUtilPct, true});
-    if (m.hasVramReadBw || m.hasVramWriteBw)
-        tiles.push_back({"VRAM BANDWIDTH",
-                         fmt("%.1f", (m.vramReadBwMBps + m.vramWriteBwMBps) / 1024.0) + " GB/s",
-                         fmt("%.0f", m.vramReadBwMBps) + " R / " + fmt("%.0f", m.vramWriteBwMBps) + " W MB/s",
-                         0, false});
-    {
-        std::string lim;
-        if (m.powerLimited)   lim += "power ";
-        if (m.tempLimited)    lim += "temp ";
-        if (m.voltageLimited) lim += "voltage ";
-        if (m.currentLimited) lim += "current ";
-        if (m.utilLimited)    lim += "util ";
-        tiles.push_back({"THROTTLE", lim.empty() ? "none" : lim, "", 0, false});
-    }
+    for (const Tile& t : all) if (metricVisible(t.id)) tiles.push_back(t);
 
     const int top = 96, pad = 12, cols = 3;
     const int tileW = (client.right - 16 * 2 - pad * (cols - 1)) / cols;
-    const int tileH = 96;
+    const int tileH = 104;
     for (size_t i = 0; i < tiles.size(); ++i) {
         int c = (int)i % cols, rrow = (int)i / cols;
         RECT tr{16 + c * (tileW + pad), top + rrow * (tileH + pad), 0, 0};
@@ -596,6 +661,7 @@ void setView(HWND hwnd, View v) {
     g_view = v;
     const bool fan = (v == View::Fan);
     const bool oc  = (v == View::Overclock);
+    ::ShowWindow(g_btnMetrics, (v == View::Dashboard) ? SW_SHOW : SW_HIDE);
     // Fan section: Auto / Max / Apply / Reset.
     ::ShowWindow(g_btnAuto,       fan ? SW_SHOW : SW_HIDE);
     ::ShowWindow(g_btnMax,        fan ? SW_SHOW : SW_HIDE);
@@ -792,6 +858,9 @@ void createControls(HWND hwnd) {
     g_btnApplyCurve = btn(kIdBtnApplyCurve, L"Apply",    212, fby, 92);
     g_btnResetCurve = btn(kIdBtnResetCurve, L"Reset",    310, fby, 92);
 
+    // Dashboard: "Metrics" dropdown (pick which tiles show), above the tiles.
+    g_btnMetrics = btn(kIdBtnMetrics, L"Metrics...", 16, 68, 120);
+
     g_btnApplyOc = btn(kIdBtnApplyOc, L"Apply",          16, 74, 88);
     g_btnResetOc = btn(kIdBtnResetOc, L"Reset to stock", 112, 74, 122);
     g_cbPreset = ::CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | CBS_DROPDOWNLIST,
@@ -819,6 +888,7 @@ void createControls(HWND hwnd) {
 
     std::vector<HWND> hide = { g_btnAuto, g_btnMax, g_btnApplyCurve, g_btnResetCurve,
                                g_btnApplyOc, g_btnResetOc, g_cbPreset, g_chkCurve };
+    ::ShowWindow(g_btnMetrics, SW_SHOW);   // Dashboard is the default view
     for (int i = 0; i < kOcCount; ++i) { hide.push_back(g_oc[i].tb); hide.push_back(g_oc[i].val); }
     for (HWND h : hide) ::ShowWindow(h, SW_HIDE);
 }
@@ -908,6 +978,22 @@ void onRDown(HWND hwnd, int x, int y) {
     }
 }
 
+// "Metrics" dropdown: a checkable popup of every available metric; toggling one
+// shows/hides that dashboard tile.
+void showMetricsMenu(HWND hwnd) {
+    HMENU menu = ::CreatePopupMenu();
+    g_menuMetricIds.clear();
+    for (const Tile& t : buildMetricRows()) {
+        UINT flags = MF_STRING | (metricVisible(t.id) ? MF_CHECKED : MF_UNCHECKED);
+        ::AppendMenuW(menu, flags, kMetricMenuBase + (UINT)g_menuMetricIds.size(), widen(t.label).c_str());
+        g_menuMetricIds.push_back(t.id);
+    }
+    RECT rb; ::GetWindowRect(g_btnMetrics, &rb);
+    ::SetForegroundWindow(hwnd);
+    ::TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN, rb.left, rb.bottom, 0, hwnd, nullptr);
+    ::DestroyMenu(menu);
+}
+
 // Dark, rounded owner-drawn button. The active nav tab is highlighted in accent.
 void drawButton(const DRAWITEMSTRUCT* d) {
     HDC dc = d->hDC;
@@ -974,6 +1060,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (id == kIdCombo && HIWORD(wp) == CBN_SELCHANGE) { reselect(hwnd); return 0; }
             if (id == kIdCbPreset && HIWORD(wp) == CBN_SELCHANGE) {
                 applyPreset((int)::SendMessageW(g_cbPreset, CB_GETCURSEL, 0, 0));
+                ::InvalidateRect(hwnd, nullptr, FALSE); return 0;
+            }
+            if (id == kIdBtnMetrics) { showMetricsMenu(hwnd); return 0; }
+            if (id >= kMetricMenuBase && id < kMetricMenuBase + (int)g_menuMetricIds.size()) {
+                const std::string& mid = g_menuMetricIds[id - kMetricMenuBase];
+                g_metricVis[mid] = !metricVisible(mid);
                 ::InvalidateRect(hwnd, nullptr, FALSE); return 0;
             }
             if (id == kIdBtnDash)  { setView(hwnd, View::Dashboard); return 0; }
