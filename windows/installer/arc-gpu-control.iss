@@ -29,6 +29,7 @@ OutputBaseFilename=ArcGpuControl-Setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\src\gui\app.ico
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\arc-gpu-gui.exe
 

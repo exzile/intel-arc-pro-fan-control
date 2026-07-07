@@ -51,7 +51,8 @@ add_executable(arc-fan-service src/service/service_main.cpp)
 target_link_libraries(arc-fan-service PRIVATE arc_core advapi32)
 
 # Native Win32/GDI dashboard. WIN32 => GUI subsystem (wWinMain, no console).
-add_executable(arc-gpu-gui WIN32 src/gui/main.cpp)
+# resource.rc embeds the app icon (window / taskbar / tray / shortcut).
+add_executable(arc-gpu-gui WIN32 src/gui/main.cpp src/gui/resource.rc)
 target_link_libraries(arc-gpu-gui PRIVATE arc_core comctl32)
 
 install(TARGETS arc-gpu arc-fan-service arc-gpu-gui RUNTIME DESTINATION bin)

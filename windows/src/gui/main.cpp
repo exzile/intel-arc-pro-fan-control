@@ -28,6 +28,7 @@
 #include "../config.hpp"
 #include "../fan_curve.hpp"
 #include "../apply.hpp"
+#include "resource.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -70,6 +71,14 @@ enum : int {
 // icon (single-click = open, right-click = menu) brings the window back.
 NOTIFYICONDATAW g_nid{};
 bool g_reallyExit = false;
+HINSTANCE g_hInst = nullptr;
+
+// The app icon (embedded via resource.rc), used everywhere. Falls back to the
+// system icon if the resource is somehow missing.
+HICON appIcon() {
+    HICON h = ::LoadIconW(g_hInst, MAKEINTRESOURCEW(IDI_APPICON));
+    return h ? h : ::LoadIconW(nullptr, IDI_APPLICATION);
+}
 
 void addTrayIcon(HWND hwnd) {
     g_nid = {};
@@ -78,7 +87,7 @@ void addTrayIcon(HWND hwnd) {
     g_nid.uID = kTrayIconId;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
-    g_nid.hIcon = ::LoadIconW(nullptr, IDI_APPLICATION);
+    g_nid.hIcon = appIcon();
     wcscpy_s(g_nid.szTip, ARRAYSIZE(g_nid.szTip), L"Arc GPU Control");
     ::Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
@@ -1034,10 +1043,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int nShow) {
     g_fontValue = ::CreateFontW(-26, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
+    g_hInst = hInst;
+
     WNDCLASSW wc{};
     wc.style = CS_DBLCLKS;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
+    wc.hIcon = appIcon();                       // taskbar / alt-tab / title bar
     wc.hCursor = ::LoadCursor(nullptr, IDC_ARROW);
     wc.lpszClassName = L"ArcGpuGuiWindow";
     ::RegisterClassW(&wc);

@@ -1,0 +1,4 @@
+#include "resource.h"
+
+// The app icon (window / taskbar / tray / Start-Menu shortcut / Explorer).
+IDI_APPICON ICON "app.ico"
