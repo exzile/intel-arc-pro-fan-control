@@ -272,6 +272,26 @@ void paintDashboard(HDC dc, const RECT& client) {
         tiles.push_back({"VRAM", fmt("%.1f", g_mem.usedBytes / gib) + " GiB",
                          "of " + fmt("%.1f", g_mem.totalBytes / gib) + " GiB", pctUsed, true});
     }
+    if (m.gpuVoltageV > 0)
+        tiles.push_back({"GPU VOLTAGE", fmt("%.0f", m.gpuVoltageV * 1000.0) + " mV", "", 0, false});
+    if (m.hasRenderUtil)
+        tiles.push_back({"RENDER UTIL", fmt("%.0f", m.renderUtilPct) + " %", "", m.renderUtilPct, true});
+    if (m.hasMediaUtil)
+        tiles.push_back({"MEDIA UTIL", fmt("%.0f", m.mediaUtilPct) + " %", "", m.mediaUtilPct, true});
+    if (m.hasVramReadBw || m.hasVramWriteBw)
+        tiles.push_back({"VRAM BANDWIDTH",
+                         fmt("%.1f", (m.vramReadBwMBps + m.vramWriteBwMBps) / 1024.0) + " GB/s",
+                         fmt("%.0f", m.vramReadBwMBps) + " R / " + fmt("%.0f", m.vramWriteBwMBps) + " W MB/s",
+                         0, false});
+    {
+        std::string lim;
+        if (m.powerLimited)   lim += "power ";
+        if (m.tempLimited)    lim += "temp ";
+        if (m.voltageLimited) lim += "voltage ";
+        if (m.currentLimited) lim += "current ";
+        if (m.utilLimited)    lim += "util ";
+        tiles.push_back({"THROTTLE", lim.empty() ? "none" : lim, "", 0, false});
+    }
 
     const int top = 96, pad = 12, cols = 3;
     const int tileW = (client.right - 16 * 2 - pad * (cols - 1)) / cols;
@@ -287,7 +307,7 @@ void paintDashboard(HDC dc, const RECT& client) {
 // --- fan-curve editor --------------------------------------------------------
 
 RECT graphRect(const RECT& client) {
-    RECT g{60, 100, client.right - 24, client.bottom - 40};
+    RECT g{60, 100, client.right - 24, client.bottom - 86};   // leave room for the bottom buttons
     return g;
 }
 
@@ -365,10 +385,10 @@ void paintCurve(HDC dc, const RECT& client) {
     }
     ::SelectObject(dc, oldBr); ::DeleteObject(node);
 
-    // Hint line.
-    RECT hint{g.left, client.bottom - 22, client.right - 16, client.bottom - 4};
+    // Hint line (above the bottom button row).
+    RECT hint{g.left, client.bottom - 68, client.right - 16, client.bottom - 50};
     ::SetTextColor(dc, RGB(130, 136, 148));
-    ::DrawTextW(dc, L"Drag a node to edit  ·  double-click to add  ·  right-click to remove",
+    ::DrawTextW(dc, L"Drag a node to edit    -    double-click to add    -    right-click to remove",
                 -1, &hint, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
@@ -463,8 +483,15 @@ void paintOverclock(HDC dc, const RECT& client) {
 
 void onPaint(HWND hwnd) {
     PAINTSTRUCT ps;
-    HDC dc = ::BeginPaint(hwnd, &ps);
+    HDC wdc = ::BeginPaint(hwnd, &ps);
     RECT client; ::GetClientRect(hwnd, &client);
+
+    // Double-buffer: draw everything into a memory bitmap, then blit once. This is
+    // what kills the per-second repaint flicker.
+    HDC dc = ::CreateCompatibleDC(wdc);
+    HBITMAP bmp = ::CreateCompatibleBitmap(wdc, client.right, client.bottom);
+    HGDIOBJ oldBmp = ::SelectObject(dc, bmp);
+
     HBRUSH bg = ::CreateSolidBrush(RGB(20, 21, 25));
     ::FillRect(dc, &client, bg); ::DeleteObject(bg);
 
@@ -480,6 +507,9 @@ void onPaint(HWND hwnd) {
         else if (g_view == View::Fan)   paintCurve(dc, client);
         else                            paintOverclock(dc, client);
     }
+
+    ::BitBlt(wdc, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
+    ::SelectObject(dc, oldBmp); ::DeleteObject(bmp); ::DeleteDC(dc);
     ::EndPaint(hwnd, &ps);
 }
 
@@ -636,6 +666,9 @@ void applyPreset(int comboIdx) {
 }
 
 void createControls(HWND hwnd) {
+    RECT cr; ::GetClientRect(hwnd, &cr);
+    const int ch = cr.bottom;
+
     g_combo = ::CreateWindowW(L"COMBOBOX", nullptr,
         WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 16, 10, 290, 220,
         hwnd, (HMENU)(INT_PTR)kIdCombo, nullptr, nullptr);
@@ -643,28 +676,29 @@ void createControls(HWND hwnd) {
         ::SendMessageW(g_combo, CB_ADDSTRING, 0, (LPARAM)widen(d.name).c_str());
     ::SendMessageW(g_combo, CB_SETCURSEL, 0, 0);
 
-    // Nav buttons (always visible), top-right of the header row.
+    // Dark owner-drawn buttons (see drawButton()).
     auto nav = [&](int id, const wchar_t* text, int x, int w) -> HWND {
-        return ::CreateWindowW(L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                               x, 10, w, 26, hwnd, (HMENU)(INT_PTR)id, nullptr, nullptr);
+        return ::CreateWindowW(L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                               x, 10, w, 28, hwnd, (HMENU)(INT_PTR)id, nullptr, nullptr);
     };
     g_btnDash  = nav(kIdBtnDash,  L"Dashboard", 314, 88);
     g_btnCurve = nav(kIdBtnCurve, L"Fan",       406, 52);
     g_btnOc    = nav(kIdBtnOc,    L"Overclock", 462, 96);
 
-    // Per-view action buttons + OC fields (hidden until their view is shown). The
-    // fan Auto/Max/Apply/Reset live in the Fan section (row above the curve).
     auto btn = [&](int id, const wchar_t* text, int x, int y, int w) -> HWND {
-        return ::CreateWindowW(L"BUTTON", text, WS_CHILD | BS_PUSHBUTTON,
-                               x, y, w, 26, hwnd, (HMENU)(INT_PTR)id, nullptr, nullptr);
+        return ::CreateWindowW(L"BUTTON", text, WS_CHILD | BS_OWNERDRAW,
+                               x, y, w, 28, hwnd, (HMENU)(INT_PTR)id, nullptr, nullptr);
     };
-    g_btnAuto       = btn(kIdBtnAuto,       L"Fan Auto", 16, 74, 78);
-    g_btnMax        = btn(kIdBtnMax,        L"Fan Max",  98, 74, 74);
-    g_btnApplyCurve = btn(kIdBtnApplyCurve, L"Apply",   176, 74, 70);
-    g_btnResetCurve = btn(kIdBtnResetCurve, L"Reset",   250, 74, 64);
+    // Fan action buttons: a row along the BOTTOM of the Fan view (no overlap with
+    // the curve, which is drawn above them).
+    const int fby = ch - 42;
+    g_btnAuto       = btn(kIdBtnAuto,       L"Fan Auto", 16,  fby, 92);
+    g_btnMax        = btn(kIdBtnMax,        L"Fan Max",  114, fby, 92);
+    g_btnApplyCurve = btn(kIdBtnApplyCurve, L"Apply",    212, fby, 92);
+    g_btnResetCurve = btn(kIdBtnResetCurve, L"Reset",    310, fby, 92);
 
-    g_btnApplyOc = btn(kIdBtnApplyOc, L"Apply",          16, 74, 84);
-    g_btnResetOc = btn(kIdBtnResetOc, L"Reset to stock", 104, 74, 122);
+    g_btnApplyOc = btn(kIdBtnApplyOc, L"Apply",          16, 74, 88);
+    g_btnResetOc = btn(kIdBtnResetOc, L"Reset to stock", 112, 74, 122);
     g_cbPreset = ::CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | CBS_DROPDOWNLIST,
                                  236, 74, 170, 240, hwnd, (HMENU)(INT_PTR)kIdCbPreset, nullptr, nullptr);
     for (const wchar_t* p : { L"Preset...", L"Stock", L"Efficient", L"Balanced", L"Performance" })
@@ -738,6 +772,36 @@ void onRDown(HWND hwnd, int x, int y) {
     }
 }
 
+// Dark, rounded owner-drawn button. The active nav tab is highlighted in accent.
+void drawButton(const DRAWITEMSTRUCT* d) {
+    HDC dc = d->hDC;
+    RECT r = d->rcItem;
+    const bool pressed  = (d->itemState & ODS_SELECTED) != 0;
+    const bool disabled = (d->itemState & ODS_DISABLED) != 0;
+    const int id = (int)d->CtlID;
+    const bool activeNav =
+        (id == kIdBtnDash  && g_view == View::Dashboard) ||
+        (id == kIdBtnCurve && g_view == View::Fan) ||
+        (id == kIdBtnOc    && g_view == View::Overclock);
+
+    COLORREF fill = activeNav ? RGB(58, 108, 190)
+                  : pressed   ? RGB(46, 50, 60)
+                              : RGB(40, 43, 52);
+    HBRUSH b = ::CreateSolidBrush(fill);
+    HPEN pen = ::CreatePen(PS_SOLID, 1, activeNav ? RGB(90, 140, 220) : RGB(64, 68, 80));
+    HGDIOBJ ob = ::SelectObject(dc, b), op = ::SelectObject(dc, pen);
+    ::RoundRect(dc, r.left, r.top, r.right, r.bottom, 8, 8);
+    ::SelectObject(dc, ob); ::SelectObject(dc, op);
+    ::DeleteObject(b); ::DeleteObject(pen);
+
+    wchar_t txt[64]; ::GetWindowTextW(d->hwndItem, txt, 64);
+    ::SetBkMode(dc, TRANSPARENT);
+    ::SetTextColor(dc, disabled ? RGB(120, 124, 132)
+                       : activeNav ? RGB(244, 247, 252) : RGB(224, 228, 236));
+    ::SelectObject(dc, g_fontLabel);
+    ::DrawTextW(dc, txt, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE:
@@ -803,6 +867,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_LBUTTONUP:      onLUp(hwnd); return 0;
         case WM_LBUTTONDBLCLK:  onDblClick(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
         case WM_RBUTTONDOWN:    onRDown(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+        case WM_DRAWITEM:       drawButton((const DRAWITEMSTRUCT*)lp); return TRUE;
+        case WM_CTLCOLORSTATIC: {   // dark bg for the OC value read-outs
+            ::SetBkMode((HDC)wp, TRANSPARENT);
+            ::SetTextColor((HDC)wp, RGB(210, 214, 222));
+            static HBRUSH s_dark = ::CreateSolidBrush(RGB(20, 21, 25));
+            return (LRESULT)s_dark;
+        }
+        case WM_ERASEBKGND:     return 1;   // onPaint fully repaints (double-buffered)
         case WM_PAINT:          onPaint(hwnd); return 0;
         case WM_DESTROY:
             ::KillTimer(hwnd, kTimerId);
@@ -835,7 +907,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int nShow) {
     ::RegisterClassW(&wc);
 
     HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"Arc GPU Dashboard",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 780, 630, nullptr, nullptr, hInst, nullptr);
     if (!hwnd) return 1;
 
