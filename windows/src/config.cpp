@@ -94,6 +94,20 @@ void applyKV(AppConfig& c, const std::string& section,
     else if (key == "oc_mem_speed")   setD(c.hasMemSpeed, c.memSpeed);
     else if (key == "oc_power_w")     setD(c.hasPowerW, c.powerW);
     else if (key == "oc_temp_c")      setD(c.hasTempC, c.tempC);
+    else if (key == "vf_curve") {
+        c.vfCurve.clear();
+        std::istringstream ss(val); std::string tok;
+        while (ss >> tok) {
+            const size_t p = tok.find(':');
+            if (p == std::string::npos) continue;
+            try {
+                VFPoint v;
+                v.voltageMv = (uint32_t)std::stoul(tok.substr(0, p));
+                v.freqMHz   = (uint32_t)std::stoul(tok.substr(p + 1));
+                c.vfCurve.push_back(v);
+            } catch (...) {}
+        }
+    }
 }
 
 // Serialize one profile's fields as flat keys (no section header).
@@ -107,6 +121,14 @@ void writeProfileBody(std::ostream& o, const AppConfig& c) {
     if (c.hasMemSpeed)   o << "oc_mem_speed = "   << c.memSpeed   << "\n";
     if (c.hasPowerW)     o << "oc_power_w = "     << c.powerW     << "\n";
     if (c.hasTempC)      o << "oc_temp_c = "      << c.tempC      << "\n";
+    if (!c.vfCurve.empty()) {
+        o << "vf_curve = ";
+        for (size_t i = 0; i < c.vfCurve.size(); ++i) {
+            if (i) o << ' ';
+            o << c.vfCurve[i].voltageMv << ':' << c.vfCurve[i].freqMHz;
+        }
+        o << "\n";
+    }
 }
 
 // Parse a single-profile file (named profiles) — accepts flat keys + legacy.

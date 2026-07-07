@@ -40,6 +40,8 @@ bool applyProfile(ArcController& arc, const AppConfig& cfg, std::string& err,
         if (cfg.hasFreqOffset && !arc.setGpuFreqOffset(cfg.freqOffset, step)) { err += "freq: " + step + "; "; ok = false; }
         // Voltage offset takes the warranty waiver internally.
         if (cfg.hasVoltOffset && !arc.setGpuVoltageOffset(cfg.voltOffset, step)) { err += "volt: " + step + "; "; ok = false; }
+        // Custom voltage-frequency curve (manual mode) — replaces the offset.
+        if (!cfg.vfCurve.empty() && !arc.writeVFCurve(cfg.vfCurve, step)) { err += "vfcurve: " + step + "; "; ok = false; }
     }
 
     return ok;

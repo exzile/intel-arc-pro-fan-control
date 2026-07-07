@@ -30,6 +30,11 @@ struct AppConfig {
     bool hasPowerW     = false; double powerW     = 0;   // Watts
     bool hasTempC      = false; double tempC      = 0;   // Celsius
 
+    // Optional custom voltage-frequency curve (manual OC-tab mode). When set, the
+    // service writes it via ctlOverclockWriteCustomVFCurve (mutually exclusive with
+    // a uniform voltage offset). Empty => not used.
+    std::vector<VFPoint> vfCurve;
+
     // Optional adapter target (short BDF, e.g. "03:00.0"). Empty => default /
     // ARC_GPU_BDF. Lets the service pin a specific card on multi-GPU boxes.
     std::string bdf;

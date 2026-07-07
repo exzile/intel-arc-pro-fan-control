@@ -50,6 +50,7 @@ enum : int {
     kIdBtnApplyOc = 1009,
     kIdBtnResetOc = 1010,
     kIdCbPreset = 1011,
+    kIdChkCurve = 1012,
     // Overclock sliders (trackbars). Order matches g_oc[].
     kIdTbFreq = 1020,
     kIdTbVolt = 1021,
@@ -147,6 +148,14 @@ constexpr int kOcCount = sizeof(g_oc) / sizeof(g_oc[0]);
 enum { OC_FREQ, OC_VOLT, OC_VLIM, OC_POWER, OC_TEMP, OC_MEM };
 std::vector<VFPoint> g_vfStock;   // stock voltage-frequency curve for the OC graph
 bool g_ocGated = false;           // current adapter is a gated (B70) card
+
+// Manual VF-curve editing: a checkbox toggles offset-mode (uniform voltage shift
+// via the slider) vs curve-mode (drag anchor nodes to shape voltage per freq).
+HWND g_chkCurve = nullptr;
+bool g_ocCurveMode = false;
+std::vector<VFPoint> g_vfEdit;     // full editable curve (curve mode)
+std::vector<int> g_vfAnchors;      // draggable anchor indices into g_vfEdit
+int g_vfDrag = -1;                 // anchor being dragged (index into g_vfAnchors)
 
 void ocUpdateVal(const OcSlider& s) {
     int v = (int)::SendMessageW(s.tb, TBM_GETPOS, 0, 0);
@@ -392,8 +401,52 @@ void paintCurve(HDC dc, const RECT& client) {
                 -1, &hint, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
-// Voltage-frequency curve: X = frequency, Y = voltage. Dashed = stock, solid =
-// preview (stock shifted by the voltage offset, clamped to the voltage limit).
+// Padded axis ranges for the OC graph (shared by paint + mouse mapping). The
+// frequency axis includes the freq-offset shift so the preview stays on-graph.
+void vfRange(int& fmin, int& fmax, int& vmin, int& vmax) {
+    uint32_t flo = 0xffffffff, fhi = 0, vlo = 0xffffffff, vhi = 0;
+    for (const VFPoint& p : g_vfStock) {
+        flo = std::min(flo, p.freqMHz); fhi = std::max(fhi, p.freqMHz);
+        vlo = std::min(vlo, p.voltageMv); vhi = std::max(vhi, p.voltageMv);
+    }
+    const int foff = ocGetPos(g_oc[OC_FREQ]);
+    fmin = (int)flo + std::min(0, foff);
+    fmax = (int)fhi + std::max(0, foff);
+    if (fmax <= fmin) fmax = fmin + 1;
+    vmin = (vlo > 40) ? (int)vlo - 40 : 0;
+    vmax = (int)vhi + 60;
+    if (vmax <= vmin) vmax = vmin + 1;
+}
+
+RECT ocGraphRect(const RECT& client) {
+    const int top = g_ocGated ? 156 : 108;
+    return RECT{16, top, client.right - 16, top + 118};
+}
+
+void initVfEdit() {   // full editable curve + ~8 evenly-spaced draggable anchors
+    g_vfEdit = g_vfStock;
+    g_vfAnchors.clear();
+    const int n = (int)g_vfEdit.size();
+    if (n < 2) return;
+    const int k = std::min(8, n);
+    for (int a = 0; a < k; ++a) g_vfAnchors.push_back(a * (n - 1) / (k - 1));
+}
+
+void reinterpVf() {   // interpolate voltage between anchors + keep it monotonic
+    for (size_t a = 0; a + 1 < g_vfAnchors.size(); ++a) {
+        int i0 = g_vfAnchors[a], i1 = g_vfAnchors[a + 1];
+        double v0 = g_vfEdit[i0].voltageMv, v1 = g_vfEdit[i1].voltageMv;
+        for (int i = i0 + 1; i < i1; ++i)
+            g_vfEdit[i].voltageMv = (uint32_t)std::lround(v0 + (v1 - v0) * (double)(i - i0) / (i1 - i0));
+    }
+    for (size_t i = 1; i < g_vfEdit.size(); ++i)
+        if (g_vfEdit[i].voltageMv < g_vfEdit[i - 1].voltageMv)
+            g_vfEdit[i].voltageMv = g_vfEdit[i - 1].voltageMv;
+}
+
+// Voltage-frequency curve. Offset mode: dashed stock vs solid preview (stock
+// shifted by the freq offset on X and voltage offset on Y, clamped to the limit).
+// Curve mode: dashed stock vs the editable curve with draggable anchor nodes.
 void paintOcGraph(HDC dc, const RECT& g) {
     HBRUSH panel = ::CreateSolidBrush(RGB(28, 30, 36));
     ::FillRect(dc, &g, panel); ::DeleteObject(panel);
@@ -408,45 +461,52 @@ void paintOcGraph(HDC dc, const RECT& g) {
                     -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         return;
     }
-    uint32_t fmin = 0xffffffff, fmax = 0, vmin = 0xffffffff, vmax = 0;
-    for (const VFPoint& p : g_vfStock) {
-        fmin = std::min(fmin, p.freqMHz); fmax = std::max(fmax, p.freqMHz);
-        vmin = std::min(vmin, p.voltageMv); vmax = std::max(vmax, p.voltageMv);
-    }
-    if (fmax <= fmin) fmax = fmin + 1;
-    // pad the voltage axis a little
-    vmin = (vmin > 30) ? vmin - 30 : 0; vmax += 30;
-    if (vmax <= vmin) vmax = vmin + 1;
-    auto X = [&](uint32_t f) { return g.left + (int)((long long)(g.right - g.left) * (f - fmin) / (fmax - fmin)); };
-    auto Y = [&](int mv) { if (mv < (int)vmin) mv = vmin; if (mv > (int)vmax) mv = vmax;
+    int fmin, fmax, vmin, vmax; vfRange(fmin, fmax, vmin, vmax);
+    auto X = [&](int f) { if (f < fmin) f = fmin; if (f > fmax) f = fmax;
+                          return g.left + (int)((long long)(g.right - g.left) * (f - fmin) / (fmax - fmin)); };
+    auto Y = [&](int mv) { if (mv < vmin) mv = vmin; if (mv > vmax) mv = vmax;
                            return g.bottom - (int)((long long)(g.bottom - g.top) * (mv - vmin) / (vmax - vmin)); };
 
-    const int off  = ocGetPos(g_oc[OC_VOLT]);
+    const int voff = ocGetPos(g_oc[OC_VOLT]);
+    const int foff = ocGetPos(g_oc[OC_FREQ]);
     const int vlim = ocGetPos(g_oc[OC_VLIM]);
 
     // Stock (dashed grey).
     HPEN sp = ::CreatePen(PS_DOT, 1, RGB(120, 126, 140));
     HGDIOBJ op = ::SelectObject(dc, sp);
     for (size_t i = 0; i < g_vfStock.size(); ++i) {
-        POINT pt{X(g_vfStock[i].freqMHz), Y(g_vfStock[i].voltageMv)};
+        POINT pt{X((int)g_vfStock[i].freqMHz), Y((int)g_vfStock[i].voltageMv)};
         if (i == 0) ::MoveToEx(dc, pt.x, pt.y, nullptr); else ::LineTo(dc, pt.x, pt.y);
     }
     ::SelectObject(dc, op); ::DeleteObject(sp);
 
-    // Preview (solid accent) = stock + offset, clamped to the voltage limit.
+    // Preview (solid accent).
     HPEN pp = ::CreatePen(PS_SOLID, 2, RGB(80, 150, 220));
     op = ::SelectObject(dc, pp);
-    for (size_t i = 0; i < g_vfStock.size(); ++i) {
-        int mv = std::min((int)g_vfStock[i].voltageMv + off, vlim);
-        POINT pt{X(g_vfStock[i].freqMHz), Y(mv)};
+    const std::vector<VFPoint>& prev = g_ocCurveMode ? g_vfEdit : g_vfStock;
+    for (size_t i = 0; i < prev.size(); ++i) {
+        int f = (int)prev[i].freqMHz, mv = (int)prev[i].voltageMv;
+        if (!g_ocCurveMode) { f += foff; mv = std::min(mv + voff, vlim); }
+        POINT pt{X(f), Y(mv)};
         if (i == 0) ::MoveToEx(dc, pt.x, pt.y, nullptr); else ::LineTo(dc, pt.x, pt.y);
     }
     ::SelectObject(dc, op); ::DeleteObject(pp);
 
+    // Anchor nodes (curve mode).
+    if (g_ocCurveMode && !g_vfEdit.empty()) {
+        HBRUSH node = ::CreateSolidBrush(RGB(232, 236, 244));
+        HGDIOBJ ob = ::SelectObject(dc, node);
+        for (int idx : g_vfAnchors) {
+            POINT pt{X((int)g_vfEdit[idx].freqMHz), Y((int)g_vfEdit[idx].voltageMv)};
+            ::Ellipse(dc, pt.x - 6, pt.y - 6, pt.x + 6, pt.y + 6);
+        }
+        ::SelectObject(dc, ob); ::DeleteObject(node);
+    }
+
     ::SetTextColor(dc, RGB(130, 136, 148));
-    RECT yl{g.left + 4, g.top + 2, g.left + 80, g.top + 18};
+    RECT yl{g.left + 6, g.top + 3, g.left + 90, g.top + 19};
     ::DrawTextW(dc, L"voltage (mV)", -1, &yl, DT_LEFT | DT_TOP | DT_SINGLELINE);
-    RECT xl{g.right - 90, g.bottom - 18, g.right - 4, g.bottom - 2};
+    RECT xl{g.right - 96, g.bottom - 18, g.right - 6, g.bottom - 3};
     ::DrawTextW(dc, L"freq (MHz)", -1, &xl, DT_RIGHT | DT_BOTTOM | DT_SINGLELINE);
 }
 
@@ -454,7 +514,6 @@ void paintOverclock(HDC dc, const RECT& client) {
     ::SetBkMode(dc, TRANSPARENT);
     ::SelectObject(dc, g_fontLabel);
 
-    int top = 108;
     if (g_ocGated) {   // banner
         RECT b{16, 106, client.right - 16, 148};
         HBRUSH bb = ::CreateSolidBrush(RGB(74, 54, 30));
@@ -465,11 +524,18 @@ void paintOverclock(HDC dc, const RECT& client) {
             L"Overclocking is limited on this GPU (B70): voltage, memory and temperature are "
             L"firmware-locked by Intel. Frequency and power limits still apply.",
             -1, &bt, DT_LEFT | DT_VCENTER | DT_WORDBREAK);
-        top = 156;
     }
 
-    RECT g{16, top, client.right - 16, top + 118};
+    RECT g = ocGraphRect(client);
     paintOcGraph(dc, g);
+    if (!g_ocGated) {
+        ::SelectObject(dc, g_fontLabel);
+        ::SetTextColor(dc, RGB(130, 136, 148));
+        RECT mh{g.left, g.bottom + 4, g.right, g.bottom + 20};
+        ::DrawTextW(dc, g_ocCurveMode ? L"Manual curve: drag the nodes to shape voltage per frequency."
+                                      : L"Offset mode: the sliders shift the whole curve. Tick Manual VF curve to shape it.",
+                    -1, &mh, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
 
     // Slider labels (greyed for gated knobs).
     ::SelectObject(dc, g_fontLabel);
@@ -530,6 +596,7 @@ void setView(HWND hwnd, View v) {
     ::ShowWindow(g_btnApplyOc, oc ? SW_SHOW : SW_HIDE);
     ::ShowWindow(g_btnResetOc, oc ? SW_SHOW : SW_HIDE);
     ::ShowWindow(g_cbPreset,   oc ? SW_SHOW : SW_HIDE);
+    ::ShowWindow(g_chkCurve,   oc ? SW_SHOW : SW_HIDE);
     for (int i = 0; i < kOcCount; ++i) {
         ::ShowWindow(g_oc[i].tb,  oc ? SW_SHOW : SW_HIDE);
         ::ShowWindow(g_oc[i].val, oc ? SW_SHOW : SW_HIDE);
@@ -614,6 +681,18 @@ void loadOcFields() {
     for (int i = 0; i < kOcCount; ++i)
         ::EnableWindow(g_oc[i].tb, (!g_ocGated || !g_oc[i].b70Gated) ? TRUE : FALSE);
     ::EnableWindow(g_cbPreset, g_ocGated ? FALSE : TRUE);
+
+    // Reset to offset mode; seed the editable curve from the (loaded/stock) curve.
+    g_ocCurveMode = false;
+    if (g_chkCurve) ::SendMessageW(g_chkCurve, BM_SETCHECK, BST_UNCHECKED, 0);
+    if (!cfg.vfCurve.empty()) { g_vfEdit = cfg.vfCurve; g_ocCurveMode = true;
+                                if (g_chkCurve) ::SendMessageW(g_chkCurve, BM_SETCHECK, BST_CHECKED, 0);
+                                // rebuild anchors over the loaded curve
+                                g_vfAnchors.clear(); int n=(int)g_vfEdit.size(); int k=std::min(8,n);
+                                for (int a=0; n>=2 && a<k; ++a) g_vfAnchors.push_back(a*(n-1)/(k-1)); }
+    else initVfEdit();
+    ::EnableWindow(g_chkCurve, (g_vfStock.size() >= 2 && !g_ocGated) ? TRUE : FALSE);
+    ::EnableWindow(g_oc[OC_VOLT].tb, (!g_ocGated && !g_ocCurveMode) ? TRUE : FALSE);
 }
 
 // Save the sliders to the selected adapter's profile + nudge the service.
@@ -626,11 +705,18 @@ void applyOc(HWND hwnd) {
     cfg.hasFreqOffset = true; cfg.freqOffset = ocGetPos(g_oc[OC_FREQ]);   // freq + power always
     cfg.hasPowerW     = true; cfg.powerW     = ocGetPos(g_oc[OC_POWER]);
     if (!g_ocGated) {   // voltage / temp / mem only where the firmware allows it
-        cfg.hasVoltOffset = true; cfg.voltOffset = ocGetPos(g_oc[OC_VOLT]);
         cfg.hasTempC      = true; cfg.tempC      = ocGetPos(g_oc[OC_TEMP]);
         cfg.hasMemSpeed   = true; cfg.memSpeed   = ocGetPos(g_oc[OC_MEM]);
+        if (g_ocCurveMode && g_vfEdit.size() >= 2) {   // manual curve replaces the offset
+            cfg.vfCurve = g_vfEdit;
+            cfg.hasVoltOffset = false;
+        } else {
+            cfg.vfCurve.clear();
+            cfg.hasVoltOffset = true; cfg.voltOffset = ocGetPos(g_oc[OC_VOLT]);
+        }
     } else {
         cfg.hasVoltOffset = cfg.hasTempC = cfg.hasMemSpeed = false;
+        cfg.vfCurve.clear();
     }
     if (!saveConfigFor(key, cfg, err)) {
         ::MessageBoxW(hwnd, widen("Could not save overclock: " + err).c_str(), L"Overclock", MB_ICONWARNING);
@@ -704,6 +790,9 @@ void createControls(HWND hwnd) {
     for (const wchar_t* p : { L"Preset...", L"Stock", L"Efficient", L"Balanced", L"Performance" })
         ::SendMessageW(g_cbPreset, CB_ADDSTRING, 0, (LPARAM)p);
     ::SendMessageW(g_cbPreset, CB_SETCURSEL, 0, 0);
+    g_chkCurve = ::CreateWindowW(L"BUTTON", L"Manual VF curve",
+        WS_CHILD | BS_AUTOCHECKBOX, 416, 76, 156, 24, hwnd, (HMENU)(INT_PTR)kIdChkCurve, nullptr, nullptr);
+    ::SendMessageW(g_chkCurve, WM_SETFONT, (WPARAM)g_fontLabel, TRUE);
 
     // OC slider rows: label (painted) + trackbar + value readout.
     const int slY0 = 268, slDY = 32;
@@ -720,7 +809,7 @@ void createControls(HWND hwnd) {
     }
 
     std::vector<HWND> hide = { g_btnAuto, g_btnMax, g_btnApplyCurve, g_btnResetCurve,
-                               g_btnApplyOc, g_btnResetOc, g_cbPreset };
+                               g_btnApplyOc, g_btnResetOc, g_cbPreset, g_chkCurve };
     for (int i = 0; i < kOcCount; ++i) { hide.push_back(g_oc[i].tb); hide.push_back(g_oc[i].val); }
     for (HWND h : hide) ::ShowWindow(h, SW_HIDE);
 }
@@ -748,6 +837,44 @@ void onMouseMove(HWND hwnd, int x, int y) {
 
 void onLUp(HWND) {
     if (g_dragIdx >= 0) { g_dragIdx = -1; ::ReleaseCapture(); }
+}
+
+// --- mouse (OC voltage-curve editing, manual mode) ---------------------------
+
+int ocHitAnchor(const RECT& g, int x, int y) {
+    if (g_vfEdit.empty()) return -1;
+    int fmin, fmax, vmin, vmax; vfRange(fmin, fmax, vmin, vmax);
+    for (size_t a = 0; a < g_vfAnchors.size(); ++a) {
+        const VFPoint& p = g_vfEdit[g_vfAnchors[a]];
+        int px = g.left + (int)((long long)(g.right - g.left) * ((int)p.freqMHz - fmin) / (fmax - fmin));
+        int py = g.bottom - (int)((long long)(g.bottom - g.top) * ((int)p.voltageMv - vmin) / (vmax - vmin));
+        if (abs(px - x) <= 9 && abs(py - y) <= 9) return (int)a;
+    }
+    return -1;
+}
+
+void onOcDown(HWND hwnd, int x, int y) {
+    if (g_view != View::Overclock || !g_ocCurveMode || g_ocGated) return;
+    RECT client; ::GetClientRect(hwnd, &client);
+    g_vfDrag = ocHitAnchor(ocGraphRect(client), x, y);
+    if (g_vfDrag >= 0) ::SetCapture(hwnd);
+}
+
+void onOcMove(HWND hwnd, int x, int y) {
+    if (g_view != View::Overclock || g_vfDrag < 0) return;
+    RECT client; ::GetClientRect(hwnd, &client);
+    RECT g = ocGraphRect(client);
+    int fmin, fmax, vmin, vmax; vfRange(fmin, fmax, vmin, vmax);
+    double frac = (double)(g.bottom - y) / std::max(1L, (long)(g.bottom - g.top));
+    int mv = vmin + (int)std::lround(frac * (vmax - vmin));
+    mv = std::max(vmin, std::min(vmax, mv));
+    g_vfEdit[g_vfAnchors[g_vfDrag]].voltageMv = (uint32_t)mv;
+    reinterpVf();
+    ::InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+void onOcUp(HWND) {
+    if (g_vfDrag >= 0) { g_vfDrag = -1; ::ReleaseCapture(); }
 }
 
 void onDblClick(HWND hwnd, int x, int y) {
@@ -849,6 +976,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (id == kIdBtnResetCurve) { g_curve = defaultCurve(); ::InvalidateRect(hwnd, nullptr, TRUE); return 0; }
             if (id == kIdBtnApplyOc) { applyOc(hwnd); return 0; }
             if (id == kIdBtnResetOc) { resetOc(hwnd); return 0; }
+            if (id == kIdChkCurve) {
+                g_ocCurveMode = (::SendMessageW(g_chkCurve, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                if (g_ocCurveMode && g_vfEdit.size() < 2) initVfEdit();
+                ::EnableWindow(g_oc[OC_VOLT].tb, (!g_ocGated && !g_ocCurveMode) ? TRUE : FALSE);
+                ::InvalidateRect(hwnd, nullptr, FALSE); return 0;
+            }
             if (id == kIdTrayOpen) { showMainWindow(hwnd); return 0; }
             if (id == kIdTrayFanAuto) { saveFanProfile(hwnd, FanMode::Auto, {}, 0); return 0; }
             if (id == kIdTrayFanMax) { saveFanProfile(hwnd, FanMode::Max, {}, 0); return 0; }
@@ -862,13 +995,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
-        case WM_LBUTTONDOWN:    onLDown(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
-        case WM_MOUSEMOVE:      onMouseMove(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
-        case WM_LBUTTONUP:      onLUp(hwnd); return 0;
+        case WM_LBUTTONDOWN:    onLDown(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                                onOcDown(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+        case WM_MOUSEMOVE:      onMouseMove(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                                onOcMove(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+        case WM_LBUTTONUP:      onLUp(hwnd); onOcUp(hwnd); return 0;
         case WM_LBUTTONDBLCLK:  onDblClick(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
         case WM_RBUTTONDOWN:    onRDown(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
         case WM_DRAWITEM:       drawButton((const DRAWITEMSTRUCT*)lp); return TRUE;
-        case WM_CTLCOLORSTATIC: {   // dark bg for the OC value read-outs
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN: {      // dark bg for the OC value read-outs + checkbox
             ::SetBkMode((HDC)wp, TRANSPARENT);
             ::SetTextColor((HDC)wp, RGB(210, 214, 222));
             static HBRUSH s_dark = ::CreateSolidBrush(RGB(20, 21, 25));
