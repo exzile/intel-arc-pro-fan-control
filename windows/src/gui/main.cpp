@@ -49,11 +49,14 @@ enum : int {
     kIdBtnOc = 1008,
     kIdBtnApplyOc = 1009,
     kIdBtnResetOc = 1010,
-    kIdEdFreq = 1020,
-    kIdEdVolt = 1021,
-    kIdEdPower = 1022,
-    kIdEdTemp = 1023,
-    kIdEdMem = 1024,
+    kIdCbPreset = 1011,
+    // Overclock sliders (trackbars). Order matches g_oc[].
+    kIdTbFreq = 1020,
+    kIdTbVolt = 1021,
+    kIdTbVlim = 1022,
+    kIdTbPower = 1023,
+    kIdTbTemp = 1024,
+    kIdTbMem = 1025,
     kIdTrayOpen = 1101,
     kIdTrayFanAuto = 1102,
     kIdTrayFanMax = 1103,
@@ -123,8 +126,39 @@ HWND  g_combo = nullptr;
 HWND  g_btnDash = nullptr, g_btnCurve = nullptr, g_btnOc = nullptr;
 HWND  g_btnAuto = nullptr, g_btnMax = nullptr;
 HWND  g_btnApplyCurve = nullptr, g_btnResetCurve = nullptr;
-HWND  g_btnApplyOc = nullptr, g_btnResetOc = nullptr;
-HWND  g_edFreq = nullptr, g_edVolt = nullptr, g_edPower = nullptr, g_edTemp = nullptr, g_edMem = nullptr;
+HWND  g_btnApplyOc = nullptr, g_btnResetOc = nullptr, g_cbPreset = nullptr;
+
+// One overclock knob = a labelled slider (trackbar) + value readout. Knobs marked
+// b70Gated ride the xe_gt_oc PCODE ops the B70 firmware rejects, so they're greyed
+// out (and a banner shown) when the B70 is selected — power/freq stay live.
+struct OcSlider {
+    int id; const wchar_t* label; int lo, hi; const wchar_t* unit; bool b70Gated;
+    HWND tb = nullptr; HWND val = nullptr;
+};
+OcSlider g_oc[] = {
+    { kIdTbFreq,  L"GPU Frequency Offset", -200, 200,  L"MHz",  false },
+    { kIdTbVolt,  L"GPU Voltage Offset",   -150, 150,  L"mV",   true  },
+    { kIdTbVlim,  L"Voltage Limit",         800, 1200, L"mV",   true  },
+    { kIdTbPower, L"Power Limit",            50, 400,  L"W",    false },
+    { kIdTbTemp,  L"Temperature Limit",      60, 110,  L"deg C",true  },
+    { kIdTbMem,   L"VRAM Memory Speed",      15,  25,  L"GT/s", true  },
+};
+constexpr int kOcCount = sizeof(g_oc) / sizeof(g_oc[0]);
+enum { OC_FREQ, OC_VOLT, OC_VLIM, OC_POWER, OC_TEMP, OC_MEM };
+std::vector<VFPoint> g_vfStock;   // stock voltage-frequency curve for the OC graph
+bool g_ocGated = false;           // current adapter is a gated (B70) card
+
+void ocUpdateVal(const OcSlider& s) {
+    int v = (int)::SendMessageW(s.tb, TBM_GETPOS, 0, 0);
+    wchar_t b[64]; ::wsprintfW(b, L"%d %s", v, s.unit);
+    ::SetWindowTextW(s.val, b);
+}
+void ocSetPos(OcSlider& s, int v) {
+    v = (v < s.lo) ? s.lo : (v > s.hi ? s.hi : v);
+    ::SendMessageW(s.tb, TBM_SETPOS, TRUE, (LPARAM)v);
+    ocUpdateVal(s);
+}
+int ocGetPos(const OcSlider& s) { return (int)::SendMessageW(s.tb, TBM_GETPOS, 0, 0); }
 
 std::wstring widen(const std::string& s) {
     if (s.empty()) return L"";
@@ -338,31 +372,93 @@ void paintCurve(HDC dc, const RECT& client) {
                 -1, &hint, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
+// Voltage-frequency curve: X = frequency, Y = voltage. Dashed = stock, solid =
+// preview (stock shifted by the voltage offset, clamped to the voltage limit).
+void paintOcGraph(HDC dc, const RECT& g) {
+    HBRUSH panel = ::CreateSolidBrush(RGB(28, 30, 36));
+    ::FillRect(dc, &g, panel); ::DeleteObject(panel);
+    ::SetBkMode(dc, TRANSPARENT);
+    ::SelectObject(dc, g_fontLabel);
+
+    if (g_vfStock.size() < 2) {
+        ::SetTextColor(dc, RGB(130, 136, 148));
+        RECT tr = g;
+        ::DrawTextW(dc, g_ocGated ? L"Voltage curve not available on this GPU (firmware-locked)."
+                                  : L"Voltage curve unavailable.",
+                    -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return;
+    }
+    uint32_t fmin = 0xffffffff, fmax = 0, vmin = 0xffffffff, vmax = 0;
+    for (const VFPoint& p : g_vfStock) {
+        fmin = std::min(fmin, p.freqMHz); fmax = std::max(fmax, p.freqMHz);
+        vmin = std::min(vmin, p.voltageMv); vmax = std::max(vmax, p.voltageMv);
+    }
+    if (fmax <= fmin) fmax = fmin + 1;
+    // pad the voltage axis a little
+    vmin = (vmin > 30) ? vmin - 30 : 0; vmax += 30;
+    if (vmax <= vmin) vmax = vmin + 1;
+    auto X = [&](uint32_t f) { return g.left + (int)((long long)(g.right - g.left) * (f - fmin) / (fmax - fmin)); };
+    auto Y = [&](int mv) { if (mv < (int)vmin) mv = vmin; if (mv > (int)vmax) mv = vmax;
+                           return g.bottom - (int)((long long)(g.bottom - g.top) * (mv - vmin) / (vmax - vmin)); };
+
+    const int off  = ocGetPos(g_oc[OC_VOLT]);
+    const int vlim = ocGetPos(g_oc[OC_VLIM]);
+
+    // Stock (dashed grey).
+    HPEN sp = ::CreatePen(PS_DOT, 1, RGB(120, 126, 140));
+    HGDIOBJ op = ::SelectObject(dc, sp);
+    for (size_t i = 0; i < g_vfStock.size(); ++i) {
+        POINT pt{X(g_vfStock[i].freqMHz), Y(g_vfStock[i].voltageMv)};
+        if (i == 0) ::MoveToEx(dc, pt.x, pt.y, nullptr); else ::LineTo(dc, pt.x, pt.y);
+    }
+    ::SelectObject(dc, op); ::DeleteObject(sp);
+
+    // Preview (solid accent) = stock + offset, clamped to the voltage limit.
+    HPEN pp = ::CreatePen(PS_SOLID, 2, RGB(80, 150, 220));
+    op = ::SelectObject(dc, pp);
+    for (size_t i = 0; i < g_vfStock.size(); ++i) {
+        int mv = std::min((int)g_vfStock[i].voltageMv + off, vlim);
+        POINT pt{X(g_vfStock[i].freqMHz), Y(mv)};
+        if (i == 0) ::MoveToEx(dc, pt.x, pt.y, nullptr); else ::LineTo(dc, pt.x, pt.y);
+    }
+    ::SelectObject(dc, op); ::DeleteObject(pp);
+
+    ::SetTextColor(dc, RGB(130, 136, 148));
+    RECT yl{g.left + 4, g.top + 2, g.left + 80, g.top + 18};
+    ::DrawTextW(dc, L"voltage (mV)", -1, &yl, DT_LEFT | DT_TOP | DT_SINGLELINE);
+    RECT xl{g.right - 90, g.bottom - 18, g.right - 4, g.bottom - 2};
+    ::DrawTextW(dc, L"freq (MHz)", -1, &xl, DT_RIGHT | DT_BOTTOM | DT_SINGLELINE);
+}
+
 void paintOverclock(HDC dc, const RECT& client) {
     ::SetBkMode(dc, TRANSPARENT);
     ::SelectObject(dc, g_fontLabel);
 
-    ::SetTextColor(dc, RGB(200, 205, 214));
-    RECT title{24, 104, client.right - 16, 124};
-    ::DrawTextW(dc, L"Overclock  —  Apply saves + applies via the service. Blank = leave unchanged.",
-                -1, &title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    const wchar_t* labels[5] = {
-        L"GPU Frequency Offset (MHz)", L"GPU Voltage Offset (mV)",
-        L"Power Limit (W)", L"Temperature Limit (deg C)", L"VRAM Memory Speed",
-    };
-    const int ys[5] = {132, 168, 204, 240, 276};
-    ::SetTextColor(dc, RGB(150, 156, 168));
-    for (int i = 0; i < 5; ++i) {
-        RECT lr{24, ys[i] + 2, 222, ys[i] + 22};
-        ::DrawTextW(dc, labels[i], -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    int top = 108;
+    if (g_ocGated) {   // banner
+        RECT b{16, 106, client.right - 16, 148};
+        HBRUSH bb = ::CreateSolidBrush(RGB(74, 54, 30));
+        ::FillRect(dc, &b, bb); ::DeleteObject(bb);
+        ::SetTextColor(dc, RGB(236, 206, 156));
+        RECT bt = b; bt.left += 12; bt.right -= 12;
+        ::DrawTextW(dc,
+            L"Overclocking is limited on this GPU (B70): voltage, memory and temperature are "
+            L"firmware-locked by Intel. Frequency and power limits still apply.",
+            -1, &bt, DT_LEFT | DT_VCENTER | DT_WORDBREAK);
+        top = 156;
     }
 
-    ::SetTextColor(dc, RGB(130, 136, 148));
-    RECT hint{24, 318, client.right - 16, 338};
-    ::DrawTextW(dc,
-        L"Overclocking can reduce the part's lifetime. The B70 is firmware-locked by Intel — only the B60 accepts OC.",
-        -1, &hint, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    RECT g{16, top, client.right - 16, top + 118};
+    paintOcGraph(dc, g);
+
+    // Slider labels (greyed for gated knobs).
+    ::SelectObject(dc, g_fontLabel);
+    for (int i = 0; i < kOcCount; ++i) {
+        const bool on = (!g_ocGated || !g_oc[i].b70Gated);
+        ::SetTextColor(dc, on ? RGB(200, 205, 214) : RGB(108, 112, 120));
+        RECT lr{24, (268 + i * 32) + 4, 202, (268 + i * 32) + 24};
+        ::DrawTextW(dc, g_oc[i].label, -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
 }
 
 void onPaint(HWND hwnd) {
@@ -400,11 +496,14 @@ void setView(HWND hwnd, View v) {
     ::ShowWindow(g_btnMax,        fan ? SW_SHOW : SW_HIDE);
     ::ShowWindow(g_btnApplyCurve, fan ? SW_SHOW : SW_HIDE);
     ::ShowWindow(g_btnResetCurve, fan ? SW_SHOW : SW_HIDE);
-    // Overclock section: Apply / Reset + the value fields.
+    // Overclock section: Apply / Reset / Preset + the sliders.
     ::ShowWindow(g_btnApplyOc, oc ? SW_SHOW : SW_HIDE);
     ::ShowWindow(g_btnResetOc, oc ? SW_SHOW : SW_HIDE);
-    for (HWND h : { g_edFreq, g_edVolt, g_edPower, g_edTemp, g_edMem })
-        ::ShowWindow(h, oc ? SW_SHOW : SW_HIDE);
+    ::ShowWindow(g_cbPreset,   oc ? SW_SHOW : SW_HIDE);
+    for (int i = 0; i < kOcCount; ++i) {
+        ::ShowWindow(g_oc[i].tb,  oc ? SW_SHOW : SW_HIDE);
+        ::ShowWindow(g_oc[i].val, oc ? SW_SHOW : SW_HIDE);
+    }
     if (fan) loadEditorCurve();
     if (oc)  loadOcFields();
     ::InvalidateRect(hwnd, nullptr, TRUE);
@@ -417,6 +516,7 @@ void reselect(HWND hwnd) {
         refreshDeviceLine();
         Telemetry t; g_arc.sampleTelemetry(t, err); g_prev = t;
         if (g_view == View::Fan) loadEditorCurve();
+        if (g_view == View::Overclock) loadOcFields();   // re-gate for the new card
         tick();
         ::InvalidateRect(hwnd, nullptr, TRUE);
     }
@@ -456,50 +556,52 @@ void applyCurve(HWND hwnd) {
     saveFanProfile(hwnd, FanMode::Curve, g_curve, 0);
 }
 
-// --- overclock tab -----------------------------------------------------------
+// --- overclock tab (sliders + presets + VF graph + B70 gating) ---------------
+// (OC_* enum + ocUpdateVal/ocSetPos/ocGetPos are defined up in the globals.)
 
-void setEditNum(HWND ed, bool has, double v) {
-    if (!has) { ::SetWindowTextW(ed, L""); return; }
-    char b[48]; std::snprintf(b, sizeof(b), "%g", v);
-    ::SetWindowTextW(ed, widen(b).c_str());
-}
-
-bool getEditNum(HWND ed, double& out) {
-    wchar_t buf[48];
-    if (::GetWindowTextW(ed, buf, 48) <= 0) return false;
-    try { out = std::stod(buf); return true; } catch (...) { return false; }
-}
-
-// Fill the OC fields from the selected adapter's saved profile, falling back to
-// the live OC state so blank fields show the current value.
+// Load the selected adapter's OC into the sliders (falling back to live state),
+// read the stock VF curve for the graph, and gate the B70-unsupported knobs.
 void loadOcFields() {
     std::string err;
     const AdapterInfo* d = g_arc.current();
-    AppConfig cfg; loadConfigFor(d ? d->key() : std::string(), cfg, err);
+    const std::string key = d ? d->key() : std::string();
+    g_ocGated = (key == "e223");     // B70/G31 firmware rejects the voltage/mem/temp OC ops
+    AppConfig cfg; loadConfigFor(key, cfg, err);
     OcState s; const bool live = g_arc.ocGetState(s, err);
-    auto pick = [&](bool cHas, double cV, bool lHas, double lV, HWND ed) {
-        if (cHas) setEditNum(ed, true, cV); else setEditNum(ed, lHas, lV);
+    auto val = [&](bool cHas, double cV, bool lHas, double lV, double dflt) {
+        if (cHas) return cV; if (lHas) return lV; return dflt;
     };
-    pick(cfg.hasFreqOffset, cfg.freqOffset, live && s.hasGpuFreqOffset, s.gpuFreqOffset, g_edFreq);
-    pick(cfg.hasVoltOffset, cfg.voltOffset, live && s.hasGpuVoltOffset, s.gpuVoltOffset, g_edVolt);
-    pick(cfg.hasPowerW,     cfg.powerW,     live && s.hasPowerLimit,    s.powerLimitW,  g_edPower);
-    pick(cfg.hasTempC,      cfg.tempC,      live && s.hasTempLimit,     s.tempLimitC,   g_edTemp);
-    pick(cfg.hasMemSpeed,   cfg.memSpeed,   live && s.hasMemSpeed,      s.memSpeed,     g_edMem);
+    ocSetPos(g_oc[OC_FREQ],  (int)std::lround(val(cfg.hasFreqOffset, cfg.freqOffset, live && s.hasGpuFreqOffset, s.gpuFreqOffset, 0)));
+    ocSetPos(g_oc[OC_VOLT],  (int)std::lround(val(cfg.hasVoltOffset, cfg.voltOffset, live && s.hasGpuVoltOffset, s.gpuVoltOffset, 0)));
+    ocSetPos(g_oc[OC_VLIM],  1200);
+    ocSetPos(g_oc[OC_POWER], (int)std::lround(val(cfg.hasPowerW, cfg.powerW, live && s.hasPowerLimit, s.powerLimitW, 190)));
+    ocSetPos(g_oc[OC_TEMP],  (int)std::lround(val(cfg.hasTempC, cfg.tempC, live && s.hasTempLimit, s.tempLimitC, 100)));
+    ocSetPos(g_oc[OC_MEM],   (int)std::lround(val(cfg.hasMemSpeed, cfg.memSpeed, live && s.hasMemSpeed, s.memSpeed, 19)));
+
+    g_vfStock.clear();
+    std::string e2; g_arc.readVFCurve(g_vfStock, false, e2);   // stock curve (empty on gated cards)
+
+    for (int i = 0; i < kOcCount; ++i)
+        ::EnableWindow(g_oc[i].tb, (!g_ocGated || !g_oc[i].b70Gated) ? TRUE : FALSE);
+    ::EnableWindow(g_cbPreset, g_ocGated ? FALSE : TRUE);
 }
 
-// Save the OC fields to the selected adapter's profile + nudge the service to
-// apply. A blank field leaves that knob unchanged.
+// Save the sliders to the selected adapter's profile + nudge the service.
 void applyOc(HWND hwnd) {
     std::string err;
     const AdapterInfo* d = g_arc.current();
     const std::string key = d ? d->key() : std::string();
     AppConfig cfg; loadConfigFor(key, cfg, err);
     cfg.ocApply = true;
-    cfg.hasFreqOffset = getEditNum(g_edFreq, cfg.freqOffset);
-    cfg.hasVoltOffset = getEditNum(g_edVolt, cfg.voltOffset);
-    cfg.hasPowerW     = getEditNum(g_edPower, cfg.powerW);
-    cfg.hasTempC      = getEditNum(g_edTemp, cfg.tempC);
-    cfg.hasMemSpeed   = getEditNum(g_edMem, cfg.memSpeed);
+    cfg.hasFreqOffset = true; cfg.freqOffset = ocGetPos(g_oc[OC_FREQ]);   // freq + power always
+    cfg.hasPowerW     = true; cfg.powerW     = ocGetPos(g_oc[OC_POWER]);
+    if (!g_ocGated) {   // voltage / temp / mem only where the firmware allows it
+        cfg.hasVoltOffset = true; cfg.voltOffset = ocGetPos(g_oc[OC_VOLT]);
+        cfg.hasTempC      = true; cfg.tempC      = ocGetPos(g_oc[OC_TEMP]);
+        cfg.hasMemSpeed   = true; cfg.memSpeed   = ocGetPos(g_oc[OC_MEM]);
+    } else {
+        cfg.hasVoltOffset = cfg.hasTempC = cfg.hasMemSpeed = false;
+    }
     if (!saveConfigFor(key, cfg, err)) {
         ::MessageBoxW(hwnd, widen("Could not save overclock: " + err).c_str(), L"Overclock", MB_ICONWARNING);
         return;
@@ -508,18 +610,29 @@ void applyOc(HWND hwnd) {
 }
 
 void resetOc(HWND hwnd) {
-    std::string err;
-    const AdapterInfo* d = g_arc.current();
-    const std::string key = d ? d->key() : std::string();
-    AppConfig cfg; loadConfigFor(key, cfg, err);
-    cfg.ocApply = true;                                  // service applies stock offsets
-    cfg.hasFreqOffset = true; cfg.freqOffset = 0;
-    cfg.hasVoltOffset = true; cfg.voltOffset = 0;
-    cfg.hasPowerW = cfg.hasTempC = cfg.hasMemSpeed = false;   // drop limits
-    saveConfigFor(key, cfg, err);
-    nudgeService();
-    loadOcFields();
+    ocSetPos(g_oc[OC_FREQ], 0);
+    ocSetPos(g_oc[OC_VOLT], 0);
+    ocSetPos(g_oc[OC_VLIM], 1200);
+    ocSetPos(g_oc[OC_TEMP], 100);
+    ocSetPos(g_oc[OC_MEM], 19);
+    applyOc(hwnd);
     ::InvalidateRect(hwnd, nullptr, TRUE);
+}
+
+// Preset dropdown: [0]="Preset...", then Stock/Efficient/Balanced/Performance
+// (mirrors the Linux OC_PRESETS). Loads the sliders; nothing applies until Apply.
+void applyPreset(int comboIdx) {
+    struct P { int off, vlim, temp, mem; };
+    static const P presets[] = {
+        {0, 1200, 100, 19}, {-50, 1050, 85, 19}, {-25, 1100, 95, 19}, {25, 1200, 100, 20},
+    };
+    const int pi = comboIdx - 1;
+    if (pi < 0 || pi >= (int)(sizeof(presets) / sizeof(presets[0]))) return;
+    const P& p = presets[pi];
+    ocSetPos(g_oc[OC_VOLT], p.off);
+    ocSetPos(g_oc[OC_VLIM], p.vlim);
+    ocSetPos(g_oc[OC_TEMP], p.temp);
+    ocSetPos(g_oc[OC_MEM],  p.mem);
 }
 
 void createControls(HWND hwnd) {
@@ -552,21 +665,30 @@ void createControls(HWND hwnd) {
 
     g_btnApplyOc = btn(kIdBtnApplyOc, L"Apply",          16, 74, 84);
     g_btnResetOc = btn(kIdBtnResetOc, L"Reset to stock", 104, 74, 122);
-    auto edit = [&](int id, int y) -> HWND {
-        HWND e = ::CreateWindowW(L"EDIT", L"", WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
-                                 232, y, 110, 24, hwnd, (HMENU)(INT_PTR)id, nullptr, nullptr);
-        ::SendMessageW(e, WM_SETFONT, (WPARAM)g_fontLabel, TRUE);
-        return e;
-    };
-    g_edFreq  = edit(kIdEdFreq,  132);
-    g_edVolt  = edit(kIdEdVolt,  168);
-    g_edPower = edit(kIdEdPower, 204);
-    g_edTemp  = edit(kIdEdTemp,  240);
-    g_edMem   = edit(kIdEdMem,   276);
+    g_cbPreset = ::CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | CBS_DROPDOWNLIST,
+                                 236, 74, 170, 240, hwnd, (HMENU)(INT_PTR)kIdCbPreset, nullptr, nullptr);
+    for (const wchar_t* p : { L"Preset...", L"Stock", L"Efficient", L"Balanced", L"Performance" })
+        ::SendMessageW(g_cbPreset, CB_ADDSTRING, 0, (LPARAM)p);
+    ::SendMessageW(g_cbPreset, CB_SETCURSEL, 0, 0);
 
-    for (HWND h : { g_btnAuto, g_btnMax, g_btnApplyCurve, g_btnResetCurve,
-                    g_btnApplyOc, g_btnResetOc, g_edFreq, g_edVolt, g_edPower, g_edTemp, g_edMem })
-        ::ShowWindow(h, SW_HIDE);
+    // OC slider rows: label (painted) + trackbar + value readout.
+    const int slY0 = 268, slDY = 32;
+    for (int i = 0; i < kOcCount; ++i) {
+        int y = slY0 + i * slDY;
+        g_oc[i].tb = ::CreateWindowW(L"msctls_trackbar32", L"",
+            WS_CHILD | TBS_HORZ | TBS_NOTICKS, 210, y, 260, 26,
+            hwnd, (HMENU)(INT_PTR)g_oc[i].id, nullptr, nullptr);
+        ::SendMessageW(g_oc[i].tb, TBM_SETRANGEMIN, FALSE, (LPARAM)g_oc[i].lo);
+        ::SendMessageW(g_oc[i].tb, TBM_SETRANGEMAX, TRUE,  (LPARAM)g_oc[i].hi);
+        g_oc[i].val = ::CreateWindowW(L"STATIC", L"", WS_CHILD, 480, y + 4, 96, 20,
+            hwnd, nullptr, nullptr, nullptr);
+        ::SendMessageW(g_oc[i].val, WM_SETFONT, (WPARAM)g_fontLabel, TRUE);
+    }
+
+    std::vector<HWND> hide = { g_btnAuto, g_btnMax, g_btnApplyCurve, g_btnResetCurve,
+                               g_btnApplyOc, g_btnResetOc, g_cbPreset };
+    for (int i = 0; i < kOcCount; ++i) { hide.push_back(g_oc[i].tb); hide.push_back(g_oc[i].val); }
+    for (HWND h : hide) ::ShowWindow(h, SW_HIDE);
 }
 
 // --- mouse (fan-curve editing) -----------------------------------------------
@@ -650,6 +772,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_COMMAND: {
             const int id = LOWORD(wp);
             if (id == kIdCombo && HIWORD(wp) == CBN_SELCHANGE) { reselect(hwnd); return 0; }
+            if (id == kIdCbPreset && HIWORD(wp) == CBN_SELCHANGE) {
+                applyPreset((int)::SendMessageW(g_cbPreset, CB_GETCURSEL, 0, 0));
+                ::InvalidateRect(hwnd, nullptr, FALSE); return 0;
+            }
             if (id == kIdBtnDash)  { setView(hwnd, View::Dashboard); return 0; }
             if (id == kIdBtnCurve) { setView(hwnd, View::Fan); return 0; }
             if (id == kIdBtnOc)    { setView(hwnd, View::Overclock); return 0; }
@@ -663,6 +789,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (id == kIdTrayFanAuto) { saveFanProfile(hwnd, FanMode::Auto, {}, 0); return 0; }
             if (id == kIdTrayFanMax) { saveFanProfile(hwnd, FanMode::Max, {}, 0); return 0; }
             if (id == kIdTrayExit) { g_reallyExit = true; ::DestroyWindow(hwnd); return 0; }
+            return 0;
+        }
+        case WM_HSCROLL: {   // an OC trackbar moved -> update its readout + VF preview
+            HWND tb = (HWND)lp;
+            for (int i = 0; i < kOcCount; ++i) {
+                if (g_oc[i].tb == tb) { ocUpdateVal(g_oc[i]); ::InvalidateRect(hwnd, nullptr, FALSE); break; }
+            }
             return 0;
         }
         case WM_LBUTTONDOWN:    onLDown(hwnd, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
@@ -685,7 +818,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int nShow) {
     // "--tray" (used by the login auto-start entry): start hidden, tray only.
     const bool startInTray = lpCmdLine && ::wcsstr(lpCmdLine, L"tray") != nullptr;
-    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES};
+    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES};
     ::InitCommonControlsEx(&icc);
 
     g_fontLabel = ::CreateFontW(-12, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
@@ -703,7 +836,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int nShow) {
 
     HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"Arc GPU Dashboard",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 780, 560, nullptr, nullptr, hInst, nullptr);
+        CW_USEDEFAULT, CW_USEDEFAULT, 780, 630, nullptr, nullptr, hInst, nullptr);
     if (!hwnd) return 1;
 
     ::ShowWindow(hwnd, startInTray ? SW_HIDE : nShow);
