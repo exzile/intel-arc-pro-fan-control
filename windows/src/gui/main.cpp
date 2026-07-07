@@ -2,15 +2,18 @@
 //
 // A self-contained GDI app over arc_core — no external UI toolkit, builds with
 // the same MSVC toolchain as the CLI/service. Windows analogue of the Linux GTK4
-// `xe-gpu-gui`, with two views:
+// `xe-gpu-gui`, with a GPU selector and three views:
 //
-//   Dashboard   live (1 s) clocks / power / temp / utilisation / fan / VRAM,
-//               a GPU selector, and Fan Auto / Fan Max buttons.
-//   Fan Curve   a draggable temperature->percent curve editor: drag nodes,
-//               double-click to add a point, right-click a node to remove it,
-//               a live GPU-temperature marker, and Apply / Reset.
+//   Dashboard   live (1 s) clocks / power / temp / utilisation / fan / VRAM.
+//   Fan         a draggable temperature->percent curve editor (drag nodes,
+//               double-click to add, right-click to remove, live temp marker),
+//               plus Fan Auto / Fan Max / Apply / Reset.
+//   Overclock   frequency / voltage offsets + power / temp / mem limits with
+//               Apply and Reset-to-stock.
 //
-// The VF-curve / overclock editor tab is not ported yet — use `arc-gpu oc`.
+// All fan/OC writes go through the SYSTEM service (the GUI edits the selected
+// adapter's profile and nudges the service), so the non-elevated GUI never drives
+// IGCL directly. Per-adapter: edits target the card chosen in the dropdown.
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
@@ -43,6 +46,14 @@ enum : int {
     kIdBtnMax = 1005,
     kIdBtnApplyCurve = 1006,
     kIdBtnResetCurve = 1007,
+    kIdBtnOc = 1008,
+    kIdBtnApplyOc = 1009,
+    kIdBtnResetOc = 1010,
+    kIdEdFreq = 1020,
+    kIdEdVolt = 1021,
+    kIdEdPower = 1022,
+    kIdEdTemp = 1023,
+    kIdEdMem = 1024,
     kIdTrayOpen = 1101,
     kIdTrayFanAuto = 1102,
     kIdTrayFanMax = 1103,
@@ -90,7 +101,7 @@ void showTrayMenu(HWND hwnd) {
     ::DestroyMenu(m);
 }
 
-enum class View { Dashboard, FanCurve };
+enum class View { Dashboard, Fan, Overclock };
 
 ArcController g_arc;
 bool          g_ready = false;
@@ -109,9 +120,11 @@ int g_dragIdx = -1;
 HFONT g_fontLabel = nullptr;
 HFONT g_fontValue = nullptr;
 HWND  g_combo = nullptr;
-HWND  g_btnDash = nullptr, g_btnCurve = nullptr;
+HWND  g_btnDash = nullptr, g_btnCurve = nullptr, g_btnOc = nullptr;
 HWND  g_btnAuto = nullptr, g_btnMax = nullptr;
 HWND  g_btnApplyCurve = nullptr, g_btnResetCurve = nullptr;
+HWND  g_btnApplyOc = nullptr, g_btnResetOc = nullptr;
+HWND  g_edFreq = nullptr, g_edVolt = nullptr, g_edPower = nullptr, g_edTemp = nullptr, g_edMem = nullptr;
 
 std::wstring widen(const std::string& s) {
     if (s.empty()) return L"";
@@ -325,6 +338,33 @@ void paintCurve(HDC dc, const RECT& client) {
                 -1, &hint, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
+void paintOverclock(HDC dc, const RECT& client) {
+    ::SetBkMode(dc, TRANSPARENT);
+    ::SelectObject(dc, g_fontLabel);
+
+    ::SetTextColor(dc, RGB(200, 205, 214));
+    RECT title{24, 104, client.right - 16, 124};
+    ::DrawTextW(dc, L"Overclock  —  Apply saves + applies via the service. Blank = leave unchanged.",
+                -1, &title, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    const wchar_t* labels[5] = {
+        L"GPU Frequency Offset (MHz)", L"GPU Voltage Offset (mV)",
+        L"Power Limit (W)", L"Temperature Limit (deg C)", L"VRAM Memory Speed",
+    };
+    const int ys[5] = {132, 168, 204, 240, 276};
+    ::SetTextColor(dc, RGB(150, 156, 168));
+    for (int i = 0; i < 5; ++i) {
+        RECT lr{24, ys[i] + 2, 222, ys[i] + 22};
+        ::DrawTextW(dc, labels[i], -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    ::SetTextColor(dc, RGB(130, 136, 148));
+    RECT hint{24, 318, client.right - 16, 338};
+    ::DrawTextW(dc,
+        L"Overclocking can reduce the part's lifetime. The B70 is firmware-locked by Intel — only the B60 accepts OC.",
+        -1, &hint, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+}
+
 void onPaint(HWND hwnd) {
     PAINTSTRUCT ps;
     HDC dc = ::BeginPaint(hwnd, &ps);
@@ -340,22 +380,33 @@ void onPaint(HWND hwnd) {
                 -1, &dl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     if (g_ready) {
-        if (g_view == View::Dashboard) paintDashboard(dc, client);
-        else                           paintCurve(dc, client);
+        if (g_view == View::Dashboard)  paintDashboard(dc, client);
+        else if (g_view == View::Fan)   paintCurve(dc, client);
+        else                            paintOverclock(dc, client);
     }
     ::EndPaint(hwnd, &ps);
 }
 
 // --- controls ----------------------------------------------------------------
 
+void loadOcFields();   // defined below (used by setView)
+
 void setView(HWND hwnd, View v) {
     g_view = v;
-    const bool dash = (v == View::Dashboard);
-    ::ShowWindow(g_btnAuto, dash ? SW_SHOW : SW_HIDE);
-    ::ShowWindow(g_btnMax, dash ? SW_SHOW : SW_HIDE);
-    ::ShowWindow(g_btnApplyCurve, dash ? SW_HIDE : SW_SHOW);
-    ::ShowWindow(g_btnResetCurve, dash ? SW_HIDE : SW_SHOW);
-    if (!dash) loadEditorCurve();
+    const bool fan = (v == View::Fan);
+    const bool oc  = (v == View::Overclock);
+    // Fan section: Auto / Max / Apply / Reset.
+    ::ShowWindow(g_btnAuto,       fan ? SW_SHOW : SW_HIDE);
+    ::ShowWindow(g_btnMax,        fan ? SW_SHOW : SW_HIDE);
+    ::ShowWindow(g_btnApplyCurve, fan ? SW_SHOW : SW_HIDE);
+    ::ShowWindow(g_btnResetCurve, fan ? SW_SHOW : SW_HIDE);
+    // Overclock section: Apply / Reset + the value fields.
+    ::ShowWindow(g_btnApplyOc, oc ? SW_SHOW : SW_HIDE);
+    ::ShowWindow(g_btnResetOc, oc ? SW_SHOW : SW_HIDE);
+    for (HWND h : { g_edFreq, g_edVolt, g_edPower, g_edTemp, g_edMem })
+        ::ShowWindow(h, oc ? SW_SHOW : SW_HIDE);
+    if (fan) loadEditorCurve();
+    if (oc)  loadOcFields();
     ::InvalidateRect(hwnd, nullptr, TRUE);
 }
 
@@ -365,7 +416,7 @@ void reselect(HWND hwnd) {
     if (idx >= 0 && g_arc.selectByIndex((size_t)idx, err)) {
         refreshDeviceLine();
         Telemetry t; g_arc.sampleTelemetry(t, err); g_prev = t;
-        if (g_view == View::FanCurve) loadEditorCurve();
+        if (g_view == View::Fan) loadEditorCurve();
         tick();
         ::InvalidateRect(hwnd, nullptr, TRUE);
     }
@@ -405,39 +456,130 @@ void applyCurve(HWND hwnd) {
     saveFanProfile(hwnd, FanMode::Curve, g_curve, 0);
 }
 
+// --- overclock tab -----------------------------------------------------------
+
+void setEditNum(HWND ed, bool has, double v) {
+    if (!has) { ::SetWindowTextW(ed, L""); return; }
+    char b[48]; std::snprintf(b, sizeof(b), "%g", v);
+    ::SetWindowTextW(ed, widen(b).c_str());
+}
+
+bool getEditNum(HWND ed, double& out) {
+    wchar_t buf[48];
+    if (::GetWindowTextW(ed, buf, 48) <= 0) return false;
+    try { out = std::stod(buf); return true; } catch (...) { return false; }
+}
+
+// Fill the OC fields from the selected adapter's saved profile, falling back to
+// the live OC state so blank fields show the current value.
+void loadOcFields() {
+    std::string err;
+    const AdapterInfo* d = g_arc.current();
+    AppConfig cfg; loadConfigFor(d ? d->key() : std::string(), cfg, err);
+    OcState s; const bool live = g_arc.ocGetState(s, err);
+    auto pick = [&](bool cHas, double cV, bool lHas, double lV, HWND ed) {
+        if (cHas) setEditNum(ed, true, cV); else setEditNum(ed, lHas, lV);
+    };
+    pick(cfg.hasFreqOffset, cfg.freqOffset, live && s.hasGpuFreqOffset, s.gpuFreqOffset, g_edFreq);
+    pick(cfg.hasVoltOffset, cfg.voltOffset, live && s.hasGpuVoltOffset, s.gpuVoltOffset, g_edVolt);
+    pick(cfg.hasPowerW,     cfg.powerW,     live && s.hasPowerLimit,    s.powerLimitW,  g_edPower);
+    pick(cfg.hasTempC,      cfg.tempC,      live && s.hasTempLimit,     s.tempLimitC,   g_edTemp);
+    pick(cfg.hasMemSpeed,   cfg.memSpeed,   live && s.hasMemSpeed,      s.memSpeed,     g_edMem);
+}
+
+// Save the OC fields to the selected adapter's profile + nudge the service to
+// apply. A blank field leaves that knob unchanged.
+void applyOc(HWND hwnd) {
+    std::string err;
+    const AdapterInfo* d = g_arc.current();
+    const std::string key = d ? d->key() : std::string();
+    AppConfig cfg; loadConfigFor(key, cfg, err);
+    cfg.ocApply = true;
+    cfg.hasFreqOffset = getEditNum(g_edFreq, cfg.freqOffset);
+    cfg.hasVoltOffset = getEditNum(g_edVolt, cfg.voltOffset);
+    cfg.hasPowerW     = getEditNum(g_edPower, cfg.powerW);
+    cfg.hasTempC      = getEditNum(g_edTemp, cfg.tempC);
+    cfg.hasMemSpeed   = getEditNum(g_edMem, cfg.memSpeed);
+    if (!saveConfigFor(key, cfg, err)) {
+        ::MessageBoxW(hwnd, widen("Could not save overclock: " + err).c_str(), L"Overclock", MB_ICONWARNING);
+        return;
+    }
+    nudgeService();
+}
+
+void resetOc(HWND hwnd) {
+    std::string err;
+    const AdapterInfo* d = g_arc.current();
+    const std::string key = d ? d->key() : std::string();
+    AppConfig cfg; loadConfigFor(key, cfg, err);
+    cfg.ocApply = true;                                  // service applies stock offsets
+    cfg.hasFreqOffset = true; cfg.freqOffset = 0;
+    cfg.hasVoltOffset = true; cfg.voltOffset = 0;
+    cfg.hasPowerW = cfg.hasTempC = cfg.hasMemSpeed = false;   // drop limits
+    saveConfigFor(key, cfg, err);
+    nudgeService();
+    loadOcFields();
+    ::InvalidateRect(hwnd, nullptr, TRUE);
+}
+
 void createControls(HWND hwnd) {
     g_combo = ::CreateWindowW(L"COMBOBOX", nullptr,
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 16, 10, 300, 220,
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 16, 10, 290, 220,
         hwnd, (HMENU)(INT_PTR)kIdCombo, nullptr, nullptr);
     for (const AdapterInfo& d : g_arc.adapters())
         ::SendMessageW(g_combo, CB_ADDSTRING, 0, (LPARAM)widen(d.name).c_str());
     ::SendMessageW(g_combo, CB_SETCURSEL, 0, 0);
 
-    auto mk = [&](int id, const wchar_t* text, int x, int w) -> HWND {
+    // Nav buttons (always visible), top-right of the header row.
+    auto nav = [&](int id, const wchar_t* text, int x, int w) -> HWND {
         return ::CreateWindowW(L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                x, 10, w, 26, hwnd, (HMENU)(INT_PTR)id, nullptr, nullptr);
     };
-    g_btnDash = mk(kIdBtnDash, L"Dashboard", 324, 92);
-    g_btnCurve = mk(kIdBtnCurve, L"Fan Curve", 420, 92);
-    g_btnAuto = mk(kIdBtnAuto, L"Fan Auto", 540, 90);
-    g_btnMax = mk(kIdBtnMax, L"Fan Max", 634, 90);
-    g_btnApplyCurve = mk(kIdBtnApplyCurve, L"Apply Curve", 540, 110);
-    g_btnResetCurve = mk(kIdBtnResetCurve, L"Reset", 654, 70);
-    ::ShowWindow(g_btnApplyCurve, SW_HIDE);
-    ::ShowWindow(g_btnResetCurve, SW_HIDE);
+    g_btnDash  = nav(kIdBtnDash,  L"Dashboard", 314, 88);
+    g_btnCurve = nav(kIdBtnCurve, L"Fan",       406, 52);
+    g_btnOc    = nav(kIdBtnOc,    L"Overclock", 462, 96);
+
+    // Per-view action buttons + OC fields (hidden until their view is shown). The
+    // fan Auto/Max/Apply/Reset live in the Fan section (row above the curve).
+    auto btn = [&](int id, const wchar_t* text, int x, int y, int w) -> HWND {
+        return ::CreateWindowW(L"BUTTON", text, WS_CHILD | BS_PUSHBUTTON,
+                               x, y, w, 26, hwnd, (HMENU)(INT_PTR)id, nullptr, nullptr);
+    };
+    g_btnAuto       = btn(kIdBtnAuto,       L"Fan Auto", 16, 74, 78);
+    g_btnMax        = btn(kIdBtnMax,        L"Fan Max",  98, 74, 74);
+    g_btnApplyCurve = btn(kIdBtnApplyCurve, L"Apply",   176, 74, 70);
+    g_btnResetCurve = btn(kIdBtnResetCurve, L"Reset",   250, 74, 64);
+
+    g_btnApplyOc = btn(kIdBtnApplyOc, L"Apply",          16, 74, 84);
+    g_btnResetOc = btn(kIdBtnResetOc, L"Reset to stock", 104, 74, 122);
+    auto edit = [&](int id, int y) -> HWND {
+        HWND e = ::CreateWindowW(L"EDIT", L"", WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+                                 232, y, 110, 24, hwnd, (HMENU)(INT_PTR)id, nullptr, nullptr);
+        ::SendMessageW(e, WM_SETFONT, (WPARAM)g_fontLabel, TRUE);
+        return e;
+    };
+    g_edFreq  = edit(kIdEdFreq,  132);
+    g_edVolt  = edit(kIdEdVolt,  168);
+    g_edPower = edit(kIdEdPower, 204);
+    g_edTemp  = edit(kIdEdTemp,  240);
+    g_edMem   = edit(kIdEdMem,   276);
+
+    for (HWND h : { g_btnAuto, g_btnMax, g_btnApplyCurve, g_btnResetCurve,
+                    g_btnApplyOc, g_btnResetOc, g_edFreq, g_edVolt, g_edPower, g_edTemp, g_edMem })
+        ::ShowWindow(h, SW_HIDE);
 }
 
 // --- mouse (fan-curve editing) -----------------------------------------------
 
 void onLDown(HWND hwnd, int x, int y) {
-    if (g_view != View::FanCurve) return;
+    if (g_view != View::Fan) return;
     RECT client; ::GetClientRect(hwnd, &client);
     g_dragIdx = hitNode(graphRect(client), x, y);
     if (g_dragIdx >= 0) ::SetCapture(hwnd);
 }
 
 void onMouseMove(HWND hwnd, int x, int y) {
-    if (g_view != View::FanCurve || g_dragIdx < 0) return;
+    if (g_view != View::Fan || g_dragIdx < 0) return;
     RECT client; ::GetClientRect(hwnd, &client);
     FanPoint np = screenToCurve(graphRect(client), x, y);
     // Keep temperatures strictly ordered so the curve stays monotonic in x.
@@ -453,7 +595,7 @@ void onLUp(HWND) {
 }
 
 void onDblClick(HWND hwnd, int x, int y) {
-    if (g_view != View::FanCurve) return;
+    if (g_view != View::Fan) return;
     RECT client; ::GetClientRect(hwnd, &client);
     RECT g = graphRect(client);
     if (x < g.left || x > g.right || y < g.top || y > g.bottom) return;
@@ -465,7 +607,7 @@ void onDblClick(HWND hwnd, int x, int y) {
 }
 
 void onRDown(HWND hwnd, int x, int y) {
-    if (g_view != View::FanCurve) return;
+    if (g_view != View::Fan) return;
     RECT client; ::GetClientRect(hwnd, &client);
     int idx = hitNode(graphRect(client), x, y);
     if (idx >= 0 && g_curve.size() > 2) {
@@ -509,11 +651,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const int id = LOWORD(wp);
             if (id == kIdCombo && HIWORD(wp) == CBN_SELCHANGE) { reselect(hwnd); return 0; }
             if (id == kIdBtnDash)  { setView(hwnd, View::Dashboard); return 0; }
-            if (id == kIdBtnCurve) { setView(hwnd, View::FanCurve); return 0; }
+            if (id == kIdBtnCurve) { setView(hwnd, View::Fan); return 0; }
+            if (id == kIdBtnOc)    { setView(hwnd, View::Overclock); return 0; }
             if (id == kIdBtnAuto)  { saveFanProfile(hwnd, FanMode::Auto, {}, 0); return 0; }
             if (id == kIdBtnMax)   { saveFanProfile(hwnd, FanMode::Max, {}, 0); return 0; }
             if (id == kIdBtnApplyCurve) { applyCurve(hwnd); return 0; }
             if (id == kIdBtnResetCurve) { g_curve = defaultCurve(); ::InvalidateRect(hwnd, nullptr, TRUE); return 0; }
+            if (id == kIdBtnApplyOc) { applyOc(hwnd); return 0; }
+            if (id == kIdBtnResetOc) { resetOc(hwnd); return 0; }
             if (id == kIdTrayOpen) { showMainWindow(hwnd); return 0; }
             if (id == kIdTrayFanAuto) { saveFanProfile(hwnd, FanMode::Auto, {}, 0); return 0; }
             if (id == kIdTrayFanMax) { saveFanProfile(hwnd, FanMode::Max, {}, 0); return 0; }
