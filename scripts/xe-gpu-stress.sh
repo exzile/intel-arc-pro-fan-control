@@ -74,15 +74,25 @@ fan_restore(){
 }
 trap fan_restore EXIT
 
-# choose a display workload (first available)
-WL=""; WLNAME=""
-if   command -v glmark2  >/dev/null 2>&1; then WL="glmark2 --run-forever"; WLNAME=glmark2
-elif command -v vkmark   >/dev/null 2>&1; then WL="vkmark --run-forever";  WLNAME=vkmark
-elif command -v glxgears >/dev/null 2>&1; then WL="glxgears";              WLNAME=glxgears
+# choose a display workload appropriate for the session. The plain `glmark2` is
+# the X11/GLX build and will NOT open a display on a pure Wayland session, so on
+# Wayland (WLD set) prefer the Wayland-native binaries; vkmark (Vulkan) works on
+# both. glxgears is a weak last resort.
+if [ -n "$WLD" ]; then
+  CANDS="glmark2-wayland vkmark glmark2-es2-wayland glmark2 glxgears"   # Wayland session
+else
+  CANDS="glmark2 vkmark glmark2-x11 glxgears"                            # X11 / XWayland
 fi
+WL=""; WLNAME=""
+for b in $CANDS; do
+  if command -v "$b" >/dev/null 2>&1; then
+    case "$b" in glxgears) WL="$b" ;; *) WL="$b --run-forever" ;; esac
+    WLNAME="$b"; break
+  fi
+done
 if [ -z "$WL" ]; then
   echo "STATUS=no_workload"
-  echo "install glmark2 or vkmark to run a stability test"
+  echo "install a GPU load generator (glmark2-wayland / vkmark) to run a stability test"
   exit 3
 fi
 

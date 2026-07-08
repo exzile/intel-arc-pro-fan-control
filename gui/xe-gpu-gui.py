@@ -1726,14 +1726,20 @@ class VoltageCurveView(Gtk.Box):
         self.window.toast("Restoring stock curve + power/clocks + memory + temp…")
 
     # ---- stability test ----
-    _LOADERS = ("glmark2", "vkmark", "glxgears")
+    def _loader_cands(self):
+        # GPU load generators appropriate for the session. On Wayland the plain
+        # X11/GLX `glmark2` can't open a display, so it does NOT count — we need
+        # a Wayland-native binary (glmark2-wayland / vkmark).
+        if os.environ.get("WAYLAND_DISPLAY"):
+            return ("glmark2-wayland", "vkmark", "glmark2-es2-wayland", "glxgears")
+        return ("glmark2", "vkmark", "glxgears")
 
     def _stress(self, *_):
         if self._testing:
             return
-        # the test needs a GPU load generator; if none is installed, offer to
-        # install one and then run automatically (see _install_loader).
-        if not any(shutil.which(x) for x in self._LOADERS):
+        # need a session-appropriate load generator; if none, offer to install
+        # one and then run automatically (see _install_loader).
+        if not any(shutil.which(x) for x in self._loader_cands()):
             self._prompt_install_loader()
             return
         self._run_stress()
@@ -1741,8 +1747,8 @@ class VoltageCurveView(Gtk.Box):
     def _prompt_install_loader(self):
         dlg = Adw.MessageDialog(
             transient_for=self.window, heading="Install stability-test tool?",
-            body="The stability test drives the GPU with a load generator "
-                 "(glmark2), which isn’t installed yet. Install it now and run "
+            body="The stability test drives the GPU with a load generator, which "
+                 "isn’t installed for this session yet. Install it now and run "
                  "the test?")
         dlg.add_response("cancel", "Cancel")
         dlg.add_response("install", "Install & Test")
@@ -1753,14 +1759,18 @@ class VoltageCurveView(Gtk.Box):
         dlg.present()
 
     def _install_loader(self):
-        if   shutil.which("apt-get"): cmd = ["pkexec", "apt-get", "install", "-y", "glmark2"]
-        elif shutil.which("dnf"):     cmd = ["pkexec", "dnf", "install", "-y", "glmark2"]
-        elif shutil.which("pacman"):  cmd = ["pkexec", "pacman", "-S", "--noconfirm", "glmark2"]
-        elif shutil.which("zypper"):  cmd = ["pkexec", "zypper", "--non-interactive", "install", "glmark2"]
+        # On Wayland (+apt) install the Wayland-native glmark2 build; the plain
+        # `glmark2` package is X11-only and won't run on a Wayland session.
+        apt = shutil.which("apt-get")
+        pkg = ("glmark2-wayland" if os.environ.get("WAYLAND_DISPLAY") else "glmark2") if apt else "glmark2"
+        if   apt:                     cmd = ["pkexec", "apt-get", "install", "-y", pkg]
+        elif shutil.which("dnf"):     cmd = ["pkexec", "dnf", "install", "-y", pkg]
+        elif shutil.which("pacman"):  cmd = ["pkexec", "pacman", "-S", "--noconfirm", pkg]
+        elif shutil.which("zypper"):  cmd = ["pkexec", "zypper", "--non-interactive", "install", pkg]
         else:
             self.window.toast("No supported package manager — install glmark2 manually", ms=4000)
             return
-        self._status_open("Installing glmark2…")
+        self._status_open(f"Installing {pkg}…")
 
         def work():
             try:
@@ -1772,13 +1782,13 @@ class VoltageCurveView(Gtk.Box):
         threading.Thread(target=work, daemon=True).start()
 
     def _install_done(self, rc):
-        if rc == 0 and any(shutil.which(x) for x in self._LOADERS):
+        if rc == 0 and any(shutil.which(x) for x in self._loader_cands()):
             self._status_set("Starting stability test…")   # modal stays; _stress_* drive it
             self._run_stress()
         else:
             self._status_close()
             self.window.toast("Install cancelled" if rc == 126 else
-                              "Could not install glmark2", ms=4000)
+                              "Could not install the test tool", ms=4000)
         return False
 
     # -- status modal (spinner + updatable label); shared by install + test --
