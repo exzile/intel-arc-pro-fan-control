@@ -167,11 +167,36 @@ This is the same wall we started at for the B60, and the same tool breaks it:
 
 ## Conclusion
 
-**B70/G31 overclocking is not achievable today** — not a Linux/`xe` gap, but Intel gating OC on the
-card everywhere (Windows included). Both routes are exhausted: firmware extraction (opcodes locked in
-signed/compressed/undocumented `PCODE_0`) and DTrace (no reference sequence exists to observe). What
-*does* work is everything the control panel actually needs — **fan control, power cap, clock limits,
-and full telemetry** — all validated and multi-GPU-isolated.
+The B60/G21 OC path does not port directly to the tested B70/G31. On that card, the B60
+`0x5f/2` begin sequence and `0x5d`/`0x5e` domains described above were rejected. However, later
+external testing on an ASRock Arc Pro B70 Creator (`8086:e223`, subsystem `1849:6020`) found that
+B70 undervolting is not categorically impossible: it uses a different Windows-derived custom-VF
+transaction.
+
+That external B70 sequence was captured from a successful Windows
+`ctlOverclockWriteCustomVFCurve` run and then replayed successfully on Linux:
+
+```text
+0x5F p1=4 p2=0 data0=1
+0x5F p1=3 p2=0 data0=0
+0x5F p1=2 p2=0 data0=0
+86x 0x5D p1=0x0a p2=3 data0=(payload << 8 | index), index 0x00..0x55
+0x5D p1=0x0b p2=3 data0=0
+0x5E p1=8 p2=0x73 data0=0
+```
+
+One important difference from the probe table above is that the external B70 read path used:
+
+```text
+0x5D p1=8 p2=0x13 data0=index
+```
+
+while writes used `p2=3`. Probing only `0x5D/8/3` can therefore miss this B70-specific table.
+Treat the current B70 result here as "the B60/G21 path is rejected on this B70/G31 setup", not as a
+universal statement that every B70/G31 firmware/board combination lacks a custom-VF path.
+
+What still works independently of this OC-path difference is **fan control, power cap, clock
+limits, and full telemetry** — all validated and multi-GPU-isolated.
 
 **Confirmed by decompiling the Windows app** (`ilspycmd` on the WinUI3 Intel Graphics Software): its
 tuning UI is *generated* from `ctlOverclockGetProperties(adapter).bSupported`. When that IGCL flag is
