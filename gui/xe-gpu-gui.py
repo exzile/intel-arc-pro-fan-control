@@ -1818,7 +1818,7 @@ class VoltageCurveView(Gtk.Box):
         self._testing = True
         self.test_btn.set_sensitive(False); self.apply_btn.set_sensitive(False)
         self.hint.set_text("stability test starting…")
-        self.window.toast(f"Stability test: {STRESS_SECS}s GPU load (fan → max)…")
+        self.window.toast(f"Stability test: current settings, {STRESS_SECS}s load (fan → max)…")
         # run via pkexec with --fan-guard: root ramps the fan to max + restores it, and
         # runs the workload as us (passing our session env so it can open the display).
         env = os.environ
@@ -1831,6 +1831,17 @@ class VoltageCurveView(Gtk.Box):
         bdf = getattr(self.window.gpu, "bdf", None)
         if getattr(self.window, "_multi_gpu", False) and bdf:
             cmd += ["--dri", "pci-" + bdf.replace(":", "_").replace(".", "_")]
+
+        # test the CURRENT (possibly unapplied) UI settings: xe-gpu-stress snapshots
+        # the live OC, applies these directly to sysfs — NOT persisted — for the test,
+        # and restores them after, so a hang can't leave an unstable OC saved for boot.
+        if getattr(self, "stock", None):
+            tgt = self._target_curve()
+            cmd += ["--oc-curve", " ".join(f"{i}:{mv}" for i, mv in enumerate(tgt))]
+            if self.f_mem is not None:
+                cmd += ["--oc-mem", str(int(self.f_mem.value * 1000))]
+            if self.f_temp is not None:
+                cmd += ["--oc-temp", str(int(self.f_temp.value))]
 
         def work():
             summary = {}

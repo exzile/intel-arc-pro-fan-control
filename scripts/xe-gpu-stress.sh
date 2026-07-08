@@ -18,7 +18,7 @@ set -uo pipefail
 SECS="${1:-60}"
 [[ "$SECS" =~ ^[0-9]+$ ]] || { echo "usage: xe-gpu-stress <seconds> [--fan-guard ...]"; exit 64; }
 shift || true
-RUNUSER=""; DISP=""; WLD=""; XRD=""; FANGUARD=0; DRIPRIME=""
+RUNUSER=""; DISP=""; WLD=""; XRD=""; FANGUARD=0; DRIPRIME=""; OC_CURVE=""; OC_MEM=""; OC_TEMP=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --fan-guard) FANGUARD=1; shift ;;
@@ -27,6 +27,9 @@ while [ "$#" -gt 0 ]; do
     --wayland)   WLD="${2:-}"; shift 2 ;;
     --runtime)   XRD="${2:-}"; shift 2 ;;
     --dri)       DRIPRIME="${2:-}"; shift 2 ;;   # DRI_PRIME to pin the load to a card
+    --oc-curve)  OC_CURVE="${2:-}"; shift 2 ;;   # test these VF-curve points (i:mv ...) transiently
+    --oc-mem)    OC_MEM="${2:-}";   shift 2 ;;   # test this memory speed (Mbps) transiently
+    --oc-temp)   OC_TEMP="${2:-}";  shift 2 ;;   # test this temp limit (degC) transiently
     *) shift ;;
   esac
 done
@@ -43,6 +46,8 @@ GPU="${ARC_GPU_BDF:-$(_detect_bdf || echo 0000:03:00.0)}"
 DEV="/sys/bus/pci/devices/$GPU"
 FREQ="$DEV/tile0/gt0/freq0/cur_freq"
 TL="$DEV/tile0/gt0/oc/temp_limit"
+OCV="$DEV/tile0/gt0/oc/vf_curve"
+OCM="$DEV/tile0/gt0/oc/mem_speed"
 
 # locate the xe hwmon node (for package temperature)
 HW=""
@@ -72,7 +77,34 @@ fan_restore(){
   [ -n "$FANPREV" ] && [ -n "$HW" ] && [ -w "$HW/pwm1_enable" ] || return 0
   echo "$FANPREV" > "$HW/pwm1_enable" 2>/dev/null
 }
-trap fan_restore EXIT
+
+# Temporarily apply the OC settings under test DIRECTLY to sysfs (NOT persisted).
+# Snapshot the live values first, restore them on exit. Transient by design: if
+# the OC hangs the GPU, nothing was written to /etc/xe-gpu-oc.conf, so the box
+# boots back on the previous known-good settings.
+OC_TESTING=0; OC_S_CURVE=""; OC_S_MEM=""; OC_S_TEMP=""
+oc_test_apply(){
+  [ "$(id -u)" -eq 0 ] || return 0
+  [ -n "$OC_CURVE$OC_MEM$OC_TEMP" ] || return 0
+  [ -w "$OCV" ] || return 0
+  OC_S_CURVE=$(awk '{printf "%s:%s ", $1, $2}' "$OCV" 2>/dev/null)
+  [ -r "$OCM" ] && OC_S_MEM=$(cat "$OCM" 2>/dev/null)
+  [ -r "$TL"  ] && OC_S_TEMP=$(cat "$TL" 2>/dev/null)
+  OC_TESTING=1
+  local p
+  for p in $OC_CURVE; do echo "${p%%:*} ${p##*:}" > "$OCV" 2>/dev/null; done
+  [ -n "$OC_MEM"  ] && echo "$OC_MEM"  > "$OCM" 2>/dev/null
+  [ -n "$OC_TEMP" ] && echo "$OC_TEMP" > "$TL"  2>/dev/null
+  echo "OC=under-test"
+}
+oc_test_restore(){
+  [ "$OC_TESTING" = 1 ] || return 0
+  local p
+  for p in $OC_S_CURVE; do echo "${p%%:*} ${p##*:}" > "$OCV" 2>/dev/null; done
+  [ -n "$OC_S_MEM"  ] && echo "$OC_S_MEM"  > "$OCM" 2>/dev/null
+  [ -n "$OC_S_TEMP" ] && echo "$OC_S_TEMP" > "$TL"  2>/dev/null
+}
+trap 'oc_test_restore; fan_restore' EXIT
 
 # choose a display workload appropriate for the session. The plain `glmark2` is
 # the X11/GLX build and will NOT open a display on a pure Wayland session, so on
@@ -107,6 +139,8 @@ BASE=$(hang_count)
 
 # ramp the fan to max for the test (restored on exit via the trap)
 fan_max_on
+# apply the OC settings under test transiently (restored on exit via the trap)
+oc_test_apply
 
 # launch the workload in its own session (so we can kill it + children), with vsync
 # uncapped (vblank_mode=0) so it actually loads the GPU rather than idling at 60 fps.
