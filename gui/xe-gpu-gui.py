@@ -5,7 +5,7 @@
 # xe_gt_oc patch exposes .../gt0/oc/vf_curve).
 # Controls call xe-fan-curve / xe-gpu-tune / xe-gpu-oc via pkexec (polkit prompts
 # for writes). Reads are unprivileged sysfs; no kernel poking here.
-import os, glob, subprocess, threading, collections, json, math, re
+import os, glob, subprocess, threading, collections, json, math, re, shutil
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -1726,9 +1726,85 @@ class VoltageCurveView(Gtk.Box):
         self.window.toast("Restoring stock curve + power/clocks + memory + temp…")
 
     # ---- stability test ----
+    _LOADERS = ("glmark2", "vkmark", "glxgears")
+
     def _stress(self, *_):
         if self._testing:
             return
+        # the test needs a GPU load generator; if none is installed, offer to
+        # install one and then run automatically (see _install_loader).
+        if not any(shutil.which(x) for x in self._LOADERS):
+            self._prompt_install_loader()
+            return
+        self._run_stress()
+
+    def _prompt_install_loader(self):
+        dlg = Adw.MessageDialog(
+            transient_for=self.window, heading="Install stability-test tool?",
+            body="The stability test drives the GPU with a load generator "
+                 "(glmark2), which isn’t installed yet. Install it now and run "
+                 "the test?")
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("install", "Install & Test")
+        dlg.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_default_response("install"); dlg.set_close_response("cancel")
+        dlg.connect("response",
+                    lambda d, r: self._install_loader() if r == "install" else None)
+        dlg.present()
+
+    def _install_loader(self):
+        if   shutil.which("apt-get"): cmd = ["pkexec", "apt-get", "install", "-y", "glmark2"]
+        elif shutil.which("dnf"):     cmd = ["pkexec", "dnf", "install", "-y", "glmark2"]
+        elif shutil.which("pacman"):  cmd = ["pkexec", "pacman", "-S", "--noconfirm", "glmark2"]
+        elif shutil.which("zypper"):  cmd = ["pkexec", "zypper", "--non-interactive", "install", "glmark2"]
+        else:
+            self.window.toast("No supported package manager — install glmark2 manually", ms=4000)
+            return
+        self._status_open("Installing glmark2…")
+
+        def work():
+            try:
+                rc = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL).returncode
+            except OSError:
+                rc = -1
+            GLib.idle_add(self._install_done, rc)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _install_done(self, rc):
+        if rc == 0 and any(shutil.which(x) for x in self._LOADERS):
+            self._status_set("Starting stability test…")   # modal stays; _stress_* drive it
+            self._run_stress()
+        else:
+            self._status_close()
+            self.window.toast("Install cancelled" if rc == 126 else
+                              "Could not install glmark2", ms=4000)
+        return False
+
+    # -- status modal (spinner + updatable label); shared by install + test --
+    def _status_open(self, text):
+        self._status_close()
+        w = Adw.Window(transient_for=self.window, modal=True, resizable=False,
+                       default_width=340, title="")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16,
+                      margin_top=28, margin_bottom=28, margin_start=28, margin_end=28)
+        sp = Gtk.Spinner(width_request=32, height_request=32); sp.start()
+        lbl = Gtk.Label(label=text, wrap=True, justify=Gtk.Justification.CENTER)
+        box.append(sp); box.append(lbl)
+        w.set_content(box); w.present()
+        self._status_win, self._status_lbl = w, lbl
+
+    def _status_set(self, text):
+        if getattr(self, "_status_lbl", None):
+            self._status_lbl.set_text(text)
+
+    def _status_close(self):
+        w = getattr(self, "_status_win", None)
+        if w:
+            w.close()
+        self._status_win = self._status_lbl = None
+
+    def _run_stress(self):
         self._testing = True
         self.test_btn.set_sensitive(False); self.apply_btn.set_sensitive(False)
         self.hint.set_text("stability test starting…")
@@ -1768,10 +1844,12 @@ class VoltageCurveView(Gtk.Box):
 
     def _stress_progress(self, sec, mhz, tc):
         self.hint.set_text(f"testing… {sec}s / {STRESS_SECS}s · {mhz} MHz · {tc}°C")
+        self._status_set(f"Testing… {sec}s / {STRESS_SECS}s\n{mhz} MHz · {tc}°C")
         return False
 
     def _stress_done(self, s):
         self._testing = False
+        self._status_close()
         self.test_btn.set_sensitive(True); self.apply_btn.set_sensitive(True)
         st = s.get("STATUS", "error")
         mt, mnf, mxf = s.get("MAXTEMP", "?"), s.get("MINFREQ", "?"), s.get("MAXFREQ", "?")
