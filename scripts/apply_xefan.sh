@@ -1,4 +1,10 @@
 #!/bin/bash
+#
+# DEPRECATED: prefer scripts/build-xe-module.sh — it does the full, VERIFIED
+# build+install (real kernel config + correct vermagic so the module actually
+# BINDS) for fan AND overclock in one step. This remains only as the low-level
+# fan-only patch/dry-run helper. See docs/LINUX-BUILD.md.
+#
 # Apply Intel fan-control patch series 168027 (adapted CachyOS 7.1.2 version) to the
 # Ubuntu 7.0.0 xe driver, then rebuild ONLY the xe module.
 #

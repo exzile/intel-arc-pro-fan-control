@@ -24,27 +24,33 @@ make olddefconfig && make modules_prepare
 The scripts expect the tree at `/home/$USER/linux-source-$BASE` (or `/usr/src/...`).
 
 ## 2. Build & install the patched module
+
+The patched `xe` driver (fan + OC sysfs) is built for your **running kernel** by
+the verified script. It uses the kernel's real config + version (from the headers
+package) so the module binds correctly — do **not** hand-edit `.config` or force
+the `vermagic`, which produces a module that loads but silently won't bind (see
+[LINUX-BUILD.md](LINUX-BUILD.md) for the full explanation and a manual walkthrough).
+
 ```bash
-# from this repo:
-sudo bash scripts/apply_xefan.sh                 # DRY RUN — check all hunks apply
-sudo APPLY=1 bash scripts/apply_xefan.sh         # apply patch + build xe.ko
+# build + verify only — safe, does not touch the running module:
+sudo bash scripts/build-xe-module.sh --build-only
+
+# build, back up the stock module, install, then reboot to activate:
+sudo bash scripts/build-xe-module.sh
+sudo reboot
 ```
-Install the module (remove the stale compressed one first — `modprobe` prefers `.zst`):
+
+Activate with a **reboot** (a live `rmmod`/`modprobe` swap is unsafe while the
+desktop compositor holds the GPU). The script prints the exact post-reboot
+checks; the key one is that the GPU still binds:
+
 ```bash
-KREL=$(uname -r); XE=/home/$USER/linux-source-$(echo $KREL|sed -E 's/-[0-9]+-.*//')/drivers/gpu/drm/xe
-MODDIR=/lib/modules/$KREL/kernel/drivers/gpu/drm/xe
-sudo mv $MODDIR/xe.ko.zst /root/xe.ko.zst.stock-bak 2>/dev/null || true
-sudo cp $XE/xe.ko $MODDIR/xe.ko && sudo depmod -a
+lspci -k -s "$(lspci -Dn | awk '/8086:e2(11|23)/{print $1; exit}')" | grep 'in use'   # -> xe
+ls /sys/class/drm/card*/device/hwmon/hwmon*/pwm1_enable                                # fan sysfs
 ```
-Reload (one clean cycle — PCI unbind avoids the gnome-shell FD-holds-module trap):
-```bash
-sudo sh -c 'echo 0000:03:00.0 > /sys/bus/pci/drivers/xe/unbind'   # your PCI id: lspci -d 8086:e211
-sudo rmmod xe && sudo modprobe xe
-```
-Verify:
-```bash
-ls /sys/class/hwmon/hwmon*/pwm1_enable        # should exist now (find the one whose name==xe)
-```
+
+> To survive **kernel updates** automatically (rather than rebuilding by hand each
+> time), use the DKMS package instead — see [../dkms/README.md](../dkms/README.md).
 
 ## 3. Install helpers + persistence
 ```bash

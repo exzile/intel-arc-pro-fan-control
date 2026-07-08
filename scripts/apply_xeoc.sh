@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+#
+# DEPRECATED: prefer scripts/build-xe-module.sh (does fan + OC build+install with
+# the correct config/vermagic so the module binds). See docs/LINUX-BUILD.md.
+#
 # apply_xeoc.sh - add the voltage-frequency-curve overclocking sysfs (xe_gt_oc)
 # to the in-tree xe driver and rebuild ONLY the xe module.
 #
