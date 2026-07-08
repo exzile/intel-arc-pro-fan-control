@@ -1870,16 +1870,38 @@ class VoltageCurveView(Gtk.Box):
         elif st == "error":
             self.window.toast("Stability test could not start")
         elif st == "unstable":
-            self.window.toast(f"UNSTABLE under load (peak {mt}°C) — reverting to stock", ms=4500)
+            self._result_dialog(
+                "Unstable under load ✗",
+                f"A GPU hang or crash was detected under sustained load — this "
+                f"overclock is NOT stable.\n\n"
+                f"Duration:  {STRESS_SECS}s at full load\n"
+                f"Peak temp:  {mt}°C\n\n"
+                f"Reverting to stock settings.")
             run_priv(["xe-gpu-oc", "reset"], self.window,
                      lambda: (setattr(self, "applied", 0),
                               setattr(self, "applied_curve", None), self._load()))
         elif st == "throttled":
-            self.window.toast(f"Stable but throttled — hit {mt}°C "
-                              f"(limit {s.get('TEMPLIMIT', '?')}°C)", ms=4500)
+            self._result_dialog(
+                "Stable, but thermally throttled ⚠",
+                f"Ran the full load with no hang, but the GPU hit its temperature "
+                f"limit and lowered clocks to stay safe.\n\n"
+                f"Duration:  {STRESS_SECS}s at full load\n"
+                f"Peak temp:  {mt}°C  (limit {s.get('TEMPLIMIT', '?')}°C)\n"
+                f"Clocks:  {mnf}–{mxf} MHz")
         else:
-            self.window.toast(f"Stable ✓ — {STRESS_SECS}s, peak {mt}°C, "
-                              f"{mnf}–{mxf} MHz, no hang", ms=4500)
+            self._result_dialog(
+                "Stability test passed ✓",
+                f"Ran the full load with no hang or crash — this overclock looks "
+                f"stable.\n\n"
+                f"Duration:  {STRESS_SECS}s at full load\n"
+                f"Peak temp:  {mt}°C\n"
+                f"Clocks:  {mnf}–{mxf} MHz")
+
+    def _result_dialog(self, heading, body):
+        dlg = Adw.MessageDialog(transient_for=self.window, heading=heading, body=body)
+        dlg.add_response("ok", "Close")
+        dlg.set_default_response("ok"); dlg.set_close_response("ok")
+        dlg.present()
         if s.get("NOTE") and st in ("ok", "throttled"):
             self.window.toast(s["NOTE"], ms=5500)
         self._hint()
