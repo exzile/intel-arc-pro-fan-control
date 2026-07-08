@@ -1,0 +1,16 @@
+[Unit]
+Description=Confirm the Intel Arc (xe) overclock survived boot (clears the failed-boot watchdog)
+# Ordered after the graphical session so it only runs once the GPU + desktop are
+# actually up. If an applied overclock hangs the box before this point, the
+# watchdog marker set by xe-gpu-oc.service stays put and the NEXT boot disables
+# the overclock instead of crash-looping.
+After=graphical.target
+Wants=graphical.target
+
+[Service]
+Type=oneshot
+# Give the desktop a stability margin before declaring the overclock good.
+ExecStart=/bin/sh -c 'sleep 45; /usr/local/bin/xe-gpu-oc confirm'
+
+[Install]
+WantedBy=graphical.target

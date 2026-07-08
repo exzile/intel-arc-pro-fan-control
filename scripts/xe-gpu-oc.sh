@@ -142,9 +142,29 @@ cmd_reset(){
   echo "restored stock VF curve + memory speed + temp limit (persisted state cleared)."
 }
 
+BOOT_PENDING="/var/lib/xe-gpu-oc/boot-pending"
+
+cmd_confirm(){ # clear the failed-boot watchdog once the desktop is proven stable
+  need_root
+  rm -f "$BOOT_PENDING"
+  echo "boot: overclock confirmed stable this session"
+}
+
 cmd_boot(){ # re-apply persisted choices (xe-gpu-oc.service)
   need_root
+  # Failed-boot watchdog: if last boot's marker is STILL here, that boot applied an
+  # overclock but never confirmed a stable desktop (it crashed / reset) — so DISABLE
+  # the overclock now instead of crash-looping. `confirm` (xe-gpu-oc-confirm.service)
+  # clears the marker ~45s into a healthy desktop.
+  if [ -f "$BOOT_PENDING" ]; then
+    rm -f "$BOOT_PENDING"
+    [ -r "$CONF" ] && mv -f "$CONF" "$CONF.crashed" 2>/dev/null
+    echo "boot: previous overclock did NOT survive boot — DISABLED it (saved to $CONF.crashed). Re-apply from the GUI when ready." >&2
+    exit 0
+  fi
   [ -r "$CONF" ] || { echo "no $CONF; nothing to apply"; exit 0; }
+  # arm the watchdog before applying: a crash before `confirm` leaves this marker set
+  mkdir -p "$(dirname "$BOOT_PENDING")"; : > "$BOOT_PENDING"; sync 2>/dev/null || true
   . "$CONF" 2>/dev/null || true
   wake
   local v="${VOLTAGE_OFFSET:-0}" m="${MEM_SPEED:-}" t="${TEMP_LIMIT:-}" vmax="${VOLTAGE_MAX:-$VMAX}"
@@ -266,6 +286,7 @@ case "${1:-}" in
   reset)  cmd_reset ;;
   profile) shift; cmd_profile "$@" ;;
   boot)   cmd_boot ;;
+  confirm) cmd_confirm ;;
   status) cmd_status ;;
   ""|-h|--help|help) usage ;;
   *) die "unknown command '$1' (try --help)" ;;

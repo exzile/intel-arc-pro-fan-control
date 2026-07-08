@@ -71,10 +71,19 @@ sudo install -m755 kernel-hook/zz-xe-fan-rebuild /etc/kernel/postinst.d/zz-xe-fa
 sudo mkdir -p /usr/local/share/xe-fan
 sudo cp patch/xe-fan-control-168027-cachyos-7.1.2.patch /usr/local/share/xe-fan/
 sudo cp systemd/etc/xe-fan-curve.conf systemd/etc/xe-gpu-tune.conf /etc/
-sudo cp systemd/xe-fan-curve.service systemd/xe-gpu-tune.service /etc/systemd/system/
+sudo cp systemd/xe-fan-curve.service systemd/xe-gpu-tune.service \
+        systemd/xe-gpu-oc.service systemd/xe-gpu-oc-confirm.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now xe-fan-curve.service xe-gpu-tune.service
+sudo systemctl enable --now xe-fan-curve.service xe-gpu-tune.service \
+                            xe-gpu-oc.service xe-gpu-oc-confirm.service
 ```
+
+> **Overclock safety (failed-boot watchdog).** `xe-gpu-oc.service` re-applies your
+> saved overclock at boot, but arms a marker first; `xe-gpu-oc-confirm.service`
+> clears it ~45 s into a healthy desktop. If an overclock ever hangs the box
+> before then, the next boot sees the un-cleared marker and **automatically
+> disables the overclock** (moves `/etc/xe-gpu-oc.conf` to `.conf.crashed`) so you
+> can never get stuck in a boot loop. Re-apply from the GUI once you adjust it.
 
 ## 4. Verify
 ```bash
