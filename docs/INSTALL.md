@@ -85,6 +85,20 @@ sudo systemctl enable --now xe-fan-curve.service xe-gpu-tune.service \
 > disables the overclock** (moves `/etc/xe-gpu-oc.conf` to `.conf.crashed`) so you
 > can never get stuck in a boot loop. Re-apply from the GUI once you adjust it.
 
+> **No repeat password prompts (polkit).** `install.sh` installs a scoped polkit
+> rule (`/etc/polkit-1/rules.d/49-xe-gpu.rules`) so the GPU-control helpers run
+> **without a `pkexec` prompt** for a locally logged-in admin (`sudo`/`wheel`,
+> active session). It's limited to those specific binaries — package installs and
+> everything else still prompt, and SSH/remote sessions are never covered. To keep
+> per-action prompts instead, just `sudo rm` that file. Needs polkit ≥ 0.106 (the
+> JS-rules `/etc/polkit-1/rules.d` directory); older systems simply keep prompting.
+
+> **Optional benchmark setup.** The GUI's opt-in *Benchmark* (FPS / VRAM bandwidth /
+> compute / real LLM tokens-per-second) installs its tools on first use, or up front
+> with `bash scripts/setup-llm-benchmark.sh` — it adds `clpeak` + Intel OpenCL and a
+> self-contained Python 3.12 env under `~/ovbench` with a small INT4 model. Skip it
+> and the stability test still runs; you just won't get the benchmark metrics.
+
 ## 4. Verify
 ```bash
 sudo xe-fan-curve show     # mode 1, your curve, RPM tracking temp

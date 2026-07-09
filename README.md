@@ -38,15 +38,20 @@ Related upstream issue: [intel/compute-runtime #885](https://github.com/intel/co
 | All-sensor temp/health monitor | raw sysfs | ✅ `xe-gpu-temps` (table/watch/json) |
 | Single-command status dashboard | — | ✅ `xe-gpu` (fan+clocks+power+temps) |
 | Native desktop GUI | — | ✅ `xe-gpu-gui` (GTK4: animated metric dashboard, fan-curve editor, VF-curve overclock tab, stability test) |
-| Live VRAM-usage metric | ❌ (debugfs, root-only) | ✅ `xe-gpu-vram.service` → GUI tile |
-| Multiple GPUs | — | ✅ per-card selector; all tabs + writes re-target the chosen card |
-| Survives reboots | — | ✅ systemd |
+| Live VRAM-usage metric | ⚠️ per-client only (`fdinfo`); device-total needs root `debugfs` | ✅ `xe-gpu-vram.service` → device-total GUI tile, no root |
+| Overclock benchmarking | — | ✅ FPS, VRAM bandwidth, compute (TFLOPS) + **real LLM tokens/sec** (OpenVINO GenAI), compared to a saved **stock baseline** |
+| Silent-corruption guard | — | ✅ LLM-output **coherence check** flags an unstable memory OC that keeps tok/s high but produces gibberish |
+| No repeat password prompts | — | ✅ optional polkit rule — the GPU-control helpers run without a prompt for a local admin |
+| Multiple GPUs | — | ✅ per-card selector; all tabs + writes re-target the chosen card; stock baseline + benchmarks keyed per-card |
+| Survives reboots | — | ✅ systemd + failed-boot watchdog (a bad OC can't cause a boot loop) |
 | Survives kernel updates | — | ✅ auto-rebuild hook |
 
 ## Desktop app — `xe-gpu-gui`
 
 A native **GTK4 / libadwaita** control panel (`xe-gpu-gui`, or "Arc GPU Dashboard" in your apps
-menu). Three tabs, all writes go through `pkexec` (normal auth prompt). Full walkthrough in
+menu). Three tabs; all writes go through `pkexec`. `install.sh` also drops in a scoped **polkit
+rule** so those helpers run **without a password prompt** for a locally logged-in admin (delete
+`/etc/polkit-1/rules.d/49-xe-gpu.rules` to go back to per-action prompts). Full walkthrough in
 **[docs/GUI.md](docs/GUI.md)**.
 
 | Fan Control | Overclock |
@@ -72,6 +77,14 @@ menu). Three tabs, all writes go through `pkexec` (normal auth prompt). Full wal
   (Stock / Efficient / Balanced / Performance); **save/load your own named profiles**; and a
   **Stability test** that runs a GPU load with the fan ramped to max and **auto-reverts** if the card
   hangs.
+  - **Benchmark (opt-in)** — the test can also measure FPS, VRAM bandwidth, compute (TFLOPS) and
+    **real LLM tokens/sec** (prefill + decode, via OpenVINO GenAI on the GPU), then show a
+    **table comparing this run to your saved stock baseline** (▲/▼ per metric). A **Stock bench**
+    button records that baseline; the app offers to run one if you benchmark an OC without it.
+    A **coherence check** on the LLM output catches an unstable *memory* overclock that keeps
+    tok/s high but silently corrupts results — treated as a failure and reverted.
+  - Stock defaults, the stock baseline, and every benchmark are **keyed per-card**, so the tool
+    works across different GPUs (it reads each card's own stock values instead of assuming the B60's).
 
 ## How it works
 
@@ -92,14 +105,12 @@ menu). Three tabs, all writes go through `pkexec` (normal auth prompt). Full wal
 ## Quick start (Ubuntu / Debian-ish)
 
 ```bash
-# 0. prereqs: matching kernel source + build tools
-sudo apt install linux-source-$(uname -r | sed -E 's/-[0-9]+-.*//') build-essential libdw-dev
-# extract it to /home/$USER/linux-source-<ver> (see docs/INSTALL.md) with .config + Module.symvers
-
-# 1. build & install the patched xe module (restores pristine source, applies patch, builds)
-sudo bash scripts/apply_xefan.sh                 # dry-run
-sudo APPLY=1 bash scripts/apply_xefan.sh         # apply + build
-# install the module + reload — see docs/INSTALL.md
+# 1. build & install the patched xe module for your running kernel
+#    (verified recipe — uses the kernel's real config + correct vermagic so the
+#     module BINDS; full detail in docs/LINUX-BUILD.md, DKMS auto-rebuild-on-
+#     kernel-update in dkms/README.md)
+sudo bash scripts/build-xe-module.sh --build-only   # optional: build + verify only
+sudo bash scripts/build-xe-module.sh && sudo reboot # build, install, reboot to activate
 
 # 2. install the userland helpers + GUI (one command; re-run after every `git pull`)
 sudo bash install.sh

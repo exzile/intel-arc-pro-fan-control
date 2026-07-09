@@ -1,0 +1,54 @@
+# Changelog
+
+All notable changes to this project. Dates are ISO (UTC).
+
+## v1.1.0 — 2026-07-09
+
+Benchmarking, cross-card support, and no-prompt authorization.
+
+### Added
+- **Overclock benchmarking (opt-in).** The stability test can now also measure **FPS**, **VRAM
+  bandwidth** and **compute (TFLOPS)** (`clpeak`), plus **real LLM tokens/sec** — prefill + decode —
+  via OpenVINO GenAI running on the Arc GPU. Setup is one-time and consent-gated
+  (`scripts/setup-llm-benchmark.sh`: Intel OpenCL + `clpeak` + a self-contained Python 3.12 env with
+  a small INT4 model under `~/ovbench`).
+- **Table result modal vs a stock baseline.** Results render as a Metric / This-run / Stock / Δ
+  table with per-metric ▲/▼ percent deltas (coloured good/bad), compared against a saved **stock
+  baseline**. A **Stock bench** button records that baseline (runs the full benchmark at stock
+  transiently, without changing your applied settings); the modal offers to run one if you benchmark
+  an overclock and no baseline exists yet.
+- **LLM-output coherence check.** An unstable *memory* overclock can keep tok/s high while silently
+  corrupting results. The benchmark now inspects the generated text (unique-word ratio + repeat
+  streak) and treats gibberish under an overclock as a **failure → auto-revert to stock** (at stock
+  it's flagged as a likely model-setup issue instead).
+- **Cross-card support.** Stock mem/temp defaults are **read from the driver and persisted per-card**
+  (`~/.config/xe-gpu-arc/stock.json`, keyed by GPU id) instead of assuming the B60's values; on a
+  clean boot the live values are captured automatically. Benchmark records are stamped with the GPU
+  id and compared only within the same card.
+- **Passwordless helpers (polkit).** `install.sh` installs a scoped rule
+  (`/etc/polkit-1/rules.d/49-xe-gpu.rules`) so the GPU-control helpers run without a `pkexec` prompt
+  for a locally logged-in admin. Limited to those specific binaries; package installs and every other
+  action still prompt, and SSH/remote sessions are never covered.
+- **Live status modal** with per-phase progress (load → clpeak → LLM) during the test.
+- **Failed-boot watchdog** so a bad overclock can never cause a boot loop (`xe-gpu-oc-confirm.service`).
+
+### Changed
+- The stability test applies your **current (even un-Applied) settings transiently** for the test and
+  restores whatever was live afterwards — so you can validate a setting before committing it.
+- `docs/GPU-TUNING.md` rewritten with the tuning reality: a positive voltage offset doesn't raise
+  clocks, `rp0` is a hard wall, memory headroom is often near zero, and an undervolt is the one
+  useful lever on a maxed-out card (efficiency, not speed).
+
+### Fixed
+- Result modal never appeared on a passing benchmark (a misplaced tail crashed `_bench_save`).
+- A stock run wasn't recognized as the baseline (it got a settings hash instead of the `stock` key),
+  giving a permanent "No stock baseline yet".
+- False "unstable" verdict from benign per-engine resets (`clpeak`/LLM compute engine) being counted
+  as hangs; stability is now judged before the benchmark runs.
+- Wayland-aware load generator (plain `glmark2` is X11-only → use `glmark2-wayland`/`vkmark`).
+
+## v1.0.1 — 2026-07-07
+Installer/packaging fixes and the first tagged desktop release.
+
+## v1.0.0
+Initial release — fan curves, power/clock tuning, VF-curve overclock, metrics dashboard, multi-GPU.

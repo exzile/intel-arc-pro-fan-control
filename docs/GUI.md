@@ -116,16 +116,36 @@ accent highlight when it differs from what's on the card:
   (`xe-gpu-oc offset … / curve … / mem … / temp …`, `xe-gpu-tune …`); **Reset** restores stock
   curve + memory + temp; **Reload** re-reads from the GPU.
 - **Test** runs a **stability check**: a 60 s GPU load (`xe-gpu-stress`, vsync uncapped) while it
-  watches clocks + package temp and the kernel log for a GPU hang/reset. It **ramps the fan to max
-  for the test and restores it after** (a safety margin), so it asks for authorization once. It
-  reports **Stable**, **Throttled** (peak hit your temp limit — stable but thermally capped), or
-  **Unstable** (a hang or crash under load) — and on Unstable it **auto-reverts to stock**. Needs a
-  workload installed (`sudo apt install glmark2` — or `vkmark`; `glxgears` is a light fallback).
-  Verify a new overclock with this before you rely on it.
+  watches clocks + package temp and the kernel log for a GPU hang/reset. It applies your **current
+  (even un-Applied) settings transiently** for the test and restores whatever was live afterwards,
+  and it **ramps the fan to max for the test and restores it after** (a safety margin). A **status
+  modal** shows live phase progress. It reports **Stable**, **Throttled** (peak hit your temp limit —
+  stable but thermally capped), or **Unstable** (a hang or crash under load) — and on Unstable it
+  **auto-reverts to stock**. Needs a workload installed (`sudo apt install glmark2` — or `vkmark`;
+  `glxgears` is a light fallback). Verify a new overclock with this before you rely on it.
+- **Benchmark** (checkbox, opt-in) — with Test, also measures **FPS**, **VRAM bandwidth** + **compute
+  (TFLOPS)** (`clpeak`), and **real LLM tokens/sec** — prefill + decode — via OpenVINO GenAI running
+  on the GPU. First use asks before installing the tools (`clpeak`, Intel OpenCL) and downloading a
+  small ~1 GB model. The result modal renders a **table comparing this run to your stock baseline**
+  (▲/▼ % per metric, coloured good/bad). The LLM output is also **coherence-checked**: an unstable
+  *memory* overclock can keep tok/s high while silently corrupting results, so gibberish output is
+  treated as a failure and reverted (at stock it's flagged as a likely model-setup issue instead).
+- **Stock bench** — records this card's **stock baseline** (the reference every OC is compared
+  against): it runs the full benchmark at stock transiently, without changing your applied settings.
+  If you benchmark an overclock and no baseline exists yet, the result modal offers to run one.
+  Stock defaults + baselines + benchmark history are stored **per-card** (keyed by GPU id), so the
+  comparison is always same-card even across GPU swaps.
+- **Reading the result vs stock** — a positive *voltage offset* alone does **not** raise clocks (it
+  only adds heat/power and can push you into throttling), so it usually shows *slower*. Real gains
+  need clock/memory headroom your specific card may not have. See **[GPU-TUNING.md](GPU-TUNING.md)**.
 - Voltage is clamped to a safe 400–1200 mV. The curve is kept **monotonic** (voltage rises with
   frequency) to match what PCODE will accept — dragging a node below its neighbour pins it up rather
   than silently failing, and the top points sit on the fixed Vmax rail. So the preview is exactly
   what lands.
 
-All writes go through the `xe-fan-curve` / `xe-gpu-tune` / `xe-gpu-oc` helpers with `pkexec`, so you
-get a normal authorization prompt and nothing runs elevated in the background.
+All writes go through the `xe-fan-curve` / `xe-gpu-tune` / `xe-gpu-oc` helpers with `pkexec`, so
+nothing runs elevated in the background. By default `pkexec` prompts for a password on every action;
+`install.sh` drops in a **polkit rule** (`/etc/polkit-1/rules.d/49-xe-gpu.rules`) that lets *only
+those specific helpers* run without a prompt, and *only* for a locally logged-in admin (`sudo`/`wheel`,
+active session — an SSH session is never covered). Package installs and every other action still
+prompt. Delete that file to return to per-action prompting.

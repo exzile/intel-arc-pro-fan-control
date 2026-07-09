@@ -25,8 +25,36 @@ Persistent config: `/etc/xe-gpu-tune.conf` (applied at boot by `xe-gpu-tune.serv
 - Power: `/sys/class/hwmon/hwmonN/power1_cap` (microwatts), `power1_crit`
 (the script auto-finds the xe card and hwmon by driver/name, so `N` doesn't matter.)
 
-## Not included (would need reverse-engineering + a patch)
-- **Temperature limit / throttle point** (the Windows "Temperature Limit" slider) — a PCODE thermal
-  write; same approach as the fan patch.
-- **Undervolt** (voltage-frequency curve) — best perf-per-watt but needs voltage-opcode RE and an
-  RFC to the xe list; carries real stability risk.
+## What actually raises performance (and what doesn't)
+
+Overclocking a Battlemage Arc is mostly about *whether there's any headroom at all* — on many cards
+there isn't. Read your own card before chasing gains (the GUI's **Stock bench** + comparison table
+does this for you):
+
+- **A positive voltage offset does NOT make the GPU faster.** Clock speed is set by the frequency
+  table and capped by the power/thermal limits — not by voltage. Adding volts at the same frequency
+  just burns more power and heat, which can push you *into* throttling and **lower** your clocks. A
+  positive offset at stock frequency is close to all-cost/no-benefit. Voltage only helps paired with
+  a real frequency increase, or as a **negative** offset (undervolt).
+- **`rp0` is a hard wall.** `max_freq` can never exceed `rp0_freq` (the firmware max boost). If
+  `max_freq == rp0_freq` and `act_freq` already sits at `rp0` under load, the core is *already
+  maxed* — there is no clock headroom, and raising the power cap won't unlock more (nothing to
+  unlock above `rp0`). Intel's firmware doesn't expose raising `rp0` on Battlemage.
+- **Memory headroom is often tiny.** GDDR6 that runs, say, 19 Gbps stock may hard-crash the whole
+  machine at 20. Bump `mem_speed` in *small* steps and always keep the LLM coherence check on — a
+  bad memory OC corrupts data silently (high tok/s, garbage output) rather than hanging.
+- **The one lever on a maxed-out card is an *undervolt* — for efficiency, not speed.** If you're
+  already holding `rp0` within the power budget, a negative voltage offset keeps the same clocks
+  while running **cooler, quieter, and at lower power**. Set it in the Overclock tab; verify with the
+  stability test.
+
+For LLM inference specifically: **decode** tok/s (the words-per-second you feel) is memory-bandwidth
+bound → helped only by a *memory* OC (if the card allows one). **Prefill** is compute bound → helped
+by higher core clock (if you have `rp0` headroom). On a card with neither, expect "stock ± noise" —
+run stock 2–3× to see the noise band before trusting any single comparison.
+
+## Also available via the `xe_gt_oc` patch (see OVERCLOCKING.md)
+These used to require reverse-engineering and are now implemented:
+- **Temperature limit / throttle point** — `.../gt0/oc/temp_limit` (`xe-gpu-oc temp …`).
+- **Voltage-frequency curve / undervolt** — `.../gt0/oc/vf_curve` (`xe-gpu-oc offset|curve …`).
+- **VRAM memory-speed overclock** — `.../gt0/oc/mem_speed` (`xe-gpu-oc mem …`).
