@@ -18,14 +18,17 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
 [ "$(id -u)" -ne 0 ] || { echo "run as your normal user, not root"; exit 1; }
 
-echo "==> OpenCL runtime (OpenVINO GPU plugin uses it to reach the Arc)"
-if ! [ -e /etc/OpenCL/vendors/intel.icd ] && ! ls /etc/OpenCL/vendors/*.icd >/dev/null 2>&1; then
-  echo "   installing intel-opencl-icd (needs sudo)…"
-  sudo apt-get install -y intel-opencl-icd clinfo || true
+# apt needs privilege — sudo from a terminal, pkexec when launched from the GUI (no tty)
+if [ -t 0 ]; then SUDO="sudo"; else SUDO="pkexec"; fi
+
+echo "==> OpenCL runtime + clpeak (OpenVINO GPU plugin + VRAM-bandwidth benchmark)"
+if ! command -v clpeak >/dev/null 2>&1 || ! ls /etc/OpenCL/vendors/*.icd >/dev/null 2>&1; then
+  echo "   installing intel-opencl-icd + clpeak (asks for authorization)…"
+  $SUDO apt-get install -y intel-opencl-icd clpeak clinfo || true
 fi
 
 echo "==> uv + Python 3.12 env"
-command -v curl >/dev/null || sudo apt-get install -y curl
+command -v curl >/dev/null || $SUDO apt-get install -y curl
 command -v uv   >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 uv python install 3.12

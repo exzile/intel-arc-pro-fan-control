@@ -18,7 +18,7 @@ set -uo pipefail
 SECS="${1:-60}"
 [[ "$SECS" =~ ^[0-9]+$ ]] || { echo "usage: xe-gpu-stress <seconds> [--fan-guard ...]"; exit 64; }
 shift || true
-RUNUSER=""; DISP=""; WLD=""; XRD=""; FANGUARD=0; DRIPRIME=""; OC_CURVE=""; OC_MEM=""; OC_TEMP=""; WLOUT=""
+RUNUSER=""; DISP=""; WLD=""; XRD=""; FANGUARD=0; DRIPRIME=""; OC_CURVE=""; OC_MEM=""; OC_TEMP=""; WLOUT=""; BENCH=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --fan-guard) FANGUARD=1; shift ;;
@@ -30,6 +30,7 @@ while [ "$#" -gt 0 ]; do
     --oc-curve)  OC_CURVE="${2:-}"; shift 2 ;;   # test these VF-curve points (i:mv ...) transiently
     --oc-mem)    OC_MEM="${2:-}";   shift 2 ;;   # test this memory speed (Mbps) transiently
     --oc-temp)   OC_TEMP="${2:-}";  shift 2 ;;   # test this temp limit (degC) transiently
+    --benchmark) BENCH=1; shift ;;               # also run clpeak + LLM benchmarks (opt-in)
     *) shift ;;
   esac
 done
@@ -186,7 +187,7 @@ MEMSPEED=$( [ -r "$OCM" ] && cat "$OCM" 2>/dev/null || echo 0 )
 # measured VRAM bandwidth via clpeak (OpenCL), if installed — directly reflects the
 # memory OC. Bandwidth is clpeak's FIRST section, so a short timeout captures it.
 MEMBW=""; COMPUTE=""
-if command -v clpeak >/dev/null 2>&1; then
+if [ "$BENCH" = 1 ] && command -v clpeak >/dev/null 2>&1; then
   CLP=$(timeout 40 clpeak 2>/dev/null)    # bandwidth (LLM decode) + compute (LLM prefill)
   MEMBW=$(printf '%s\n' "$CLP"   | awk '/Global memory bandwidth/{f=1;next} /^[[:space:]]*$/{f=0} f{print $NF}' | sort -g | tail -1)
   COMPUTE=$(printf '%s\n' "$CLP" | awk '/Single-precision compute/{f=1;next}  /^[[:space:]]*$/{f=0} f{print $NF}' | sort -g | tail -1)
@@ -199,7 +200,7 @@ fi
 # bandwidth-bound) tok/s, measured with the OC still applied.
 LLMPRE=""; LLMDEC=""
 LLMH="/home/${RUNUSER:-joey}/ovbench"
-if [ -x "$LLMH/bin/python" ] && [ -f "$LLMH/llmbench.py" ] && [ -d "$LLMH/model" ]; then
+if [ "$BENCH" = 1 ] && [ -x "$LLMH/bin/python" ] && [ -f "$LLMH/llmbench.py" ] && [ -d "$LLMH/model" ]; then
   LO=$(timeout 90 "$LLMH/bin/python" "$LLMH/llmbench.py" "$LLMH/model" GPU 2>/dev/null)
   LLMPRE=$(printf '%s\n' "$LO" | awk -F= '/^PREFILL=/{printf "%.0f",$2; exit}')
   LLMDEC=$(printf '%s\n' "$LO" | awk -F= '/^DECODE=/{printf "%.0f",$2; exit}')

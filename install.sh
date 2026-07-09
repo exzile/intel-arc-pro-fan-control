@@ -24,6 +24,9 @@ for f in xe-fan-curve xe-gpu-tune xe-gpu-temps xe-gpu xe-gpu-oc xe-gpu-stress xe
 done
 [ -f scripts/xe-fan-rebuild.sh ] && install -m755 scripts/xe-fan-rebuild.sh /usr/local/sbin/xe-fan-rebuild \
   && echo "  installed /usr/local/sbin/xe-fan-rebuild"
+# optional LLM/bandwidth benchmark setup (the GUI runs this on benchmark opt-in)
+[ -f scripts/setup-llm-benchmark.sh ] && install -m755 scripts/setup-llm-benchmark.sh "$BIN/xe-gpu-benchmark-setup" \
+  && echo "  installed $BIN/xe-gpu-benchmark-setup"
 
 # GUI -> /usr/local/bin
 if [ -f gui/xe-gpu-gui.py ]; then

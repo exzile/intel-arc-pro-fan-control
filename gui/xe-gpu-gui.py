@@ -1339,6 +1339,11 @@ class VoltageCurveView(Gtk.Box):
         self.hint = Gtk.Label(xalign=0, hexpand=True); self.hint.add_css_class("dim")
         bar.append(self.hint)
         self._testing = False
+        self.bench_chk = Gtk.CheckButton(label="Benchmark")
+        self.bench_chk.set_tooltip_text(
+            "Also measure VRAM bandwidth + real LLM tokens/sec during the test. "
+            "First use asks before installing tools and downloading a small model.")
+        bar.append(self.bench_chk)
         self.test_btn = icon_button(
             "media-playback-start-symbolic",
             f"Run a {STRESS_SECS}s GPU load and watch for instability / throttling "
@@ -1742,7 +1747,62 @@ class VoltageCurveView(Gtk.Box):
         if not any(shutil.which(x) for x in self._loader_cands()):
             self._prompt_install_loader()
             return
+        # opt-in benchmark: if requested but not set up, confirm before installing
+        # tools / downloading a model.
+        if self.bench_chk.get_active() and not self._bench_ready():
+            self._prompt_setup_benchmark()
+            return
         self._run_stress()
+
+    def _bench_ready(self):
+        return bool(shutil.which("clpeak")) and \
+            os.path.isdir(os.path.expanduser("~/ovbench/model"))
+
+    def _prompt_setup_benchmark(self):
+        dlg = Adw.MessageDialog(
+            transient_for=self.window, heading="Set up benchmarking?",
+            body="The benchmark measures VRAM bandwidth and real LLM tokens/sec on the "
+                 "GPU. Setting it up (one-time) installs the benchmark tools "
+                 "(clpeak + Intel OpenCL) and downloads a small ~1 GB language model — "
+                 "this can take a few minutes. Proceed?")
+        dlg.add_response("cancel", "Just the stability test")
+        dlg.add_response("setup", "Set up & benchmark")
+        dlg.set_response_appearance("setup", Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_default_response("setup"); dlg.set_close_response("cancel")
+        def resp(d, r):
+            if r == "setup":
+                self._setup_benchmark()
+            else:
+                self.bench_chk.set_active(False)   # fall back to the plain stability test
+                self._run_stress()
+        dlg.connect("response", resp)
+        dlg.present()
+
+    def _setup_benchmark(self):
+        setup = shutil.which("xe-gpu-benchmark-setup") or "/usr/local/bin/xe-gpu-benchmark-setup"
+        if not os.path.exists(setup):
+            self.window.toast("benchmark setup script not found (scripts/setup-llm-benchmark.sh)", ms=5000)
+            self.bench_chk.set_active(False); return
+        self._status_open("Setting up benchmark…\n(installing tools + downloading model)")
+        def work():
+            try:
+                rc = subprocess.run(["bash", setup], stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL).returncode
+            except OSError:
+                rc = -1
+            GLib.idle_add(self._setup_benchmark_done, rc)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _setup_benchmark_done(self, rc):
+        if rc == 0 and self._bench_ready():
+            self._status_set("Starting benchmark…")   # modal stays; _stress_* drive it
+            self._run_stress()
+        else:
+            self._status_close()
+            self.bench_chk.set_active(False)
+            self.window.toast("Benchmark setup didn't complete — running the stability test only", ms=4500)
+            self._run_stress()
+        return False
 
     def _prompt_install_loader(self):
         dlg = Adw.MessageDialog(
@@ -1760,19 +1820,18 @@ class VoltageCurveView(Gtk.Box):
 
     def _install_loader(self):
         # On Wayland (+apt) install the Wayland-native glmark2 build; the plain
-        # `glmark2` package is X11-only and won't run on a Wayland session. On apt
-        # also pull clpeak + the Intel OpenCL runtime so the test can report a
-        # measured VRAM-bandwidth number (reflects the memory overclock).
+        # `glmark2` package is X11-only and won't run on a Wayland session. (The
+        # heavier benchmark tools install separately, on benchmark opt-in.)
         apt = shutil.which("apt-get")
         pkg = ("glmark2-wayland" if os.environ.get("WAYLAND_DISPLAY") else "glmark2") if apt else "glmark2"
-        if   apt:                     cmd = ["pkexec", "apt-get", "install", "-y", pkg, "clpeak", "intel-opencl-icd"]
+        if   apt:                     cmd = ["pkexec", "apt-get", "install", "-y", pkg]
         elif shutil.which("dnf"):     cmd = ["pkexec", "dnf", "install", "-y", pkg]
         elif shutil.which("pacman"):  cmd = ["pkexec", "pacman", "-S", "--noconfirm", pkg]
         elif shutil.which("zypper"):  cmd = ["pkexec", "zypper", "--non-interactive", "install", pkg]
         else:
             self.window.toast("No supported package manager — install glmark2 manually", ms=4000)
             return
-        self._status_open("Installing test + benchmark tools…" if apt else f"Installing {pkg}…")
+        self._status_open(f"Installing {pkg}…")
 
         def work():
             try:
@@ -1847,6 +1906,8 @@ class VoltageCurveView(Gtk.Box):
                 cmd += ["--oc-mem", str(int(self.f_mem.value * 1000))]
             if self.f_temp is not None:
                 cmd += ["--oc-temp", str(int(self.f_temp.value))]
+        if self.bench_chk.get_active():
+            cmd += ["--benchmark"]    # opt-in: also run clpeak + LLM benchmarks
 
         def work():
             summary = {}
