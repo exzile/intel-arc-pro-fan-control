@@ -1154,6 +1154,9 @@ class VoltageCurveView(Gtk.Box):
         self.add_css_class("oc-page")
         self.gpu = gpu
         self.window = window
+        self._card_id = gpu.identity().get("id", "-")   # e.g. 8086:e211 — keys per-card stock + benchmarks
+        self._stock_uncalibrated = False
+        self._force_stock = False
         self.stock = []            # baseline curve (mV per point), applied offset removed
         self.applied = 0           # uniform offset currently on the GPU
         self.applied_curve = None  # custom curve live on the GPU (list mV) or None
@@ -1349,6 +1352,12 @@ class VoltageCurveView(Gtk.Box):
             f"Run a {STRESS_SECS}s GPU load and watch for instability / throttling "
             "(auto-reverts to stock if it hangs)", self._stress, label="Test")
         bar.append(self.test_btn)
+        self.stockbench_btn = icon_button(
+            "utilities-system-monitor-symbolic",
+            "Benchmark the card at stock settings to record the baseline that overclocks "
+            "are compared against (doesn't change your applied settings)",
+            self._bench_stock, label="Stock bench")
+        bar.append(self.stockbench_btn)
         bar.append(icon_button("view-refresh-symbolic", "Re-read everything from the GPU",
                                lambda *_: self._load(), label="Reload"))
         self.reset_btn = icon_button("edit-undo-symbolic", "Restore stock curve + memory + temp",
@@ -1525,9 +1534,33 @@ class VoltageCurveView(Gtk.Box):
                 self.prof_applied = prof["current"]
                 self.profile_dd.set_selected(opts.index(prof["current"]))
         self._prof_refresh()
+        self._calibrate_stock()
         self._hint(); self.area.queue_draw(); self._mark()
         self._apply_oc_gate(bool(data))
         return False
+
+    def _calibrate_stock(self):
+        # Determine this card's stock mem/temp instead of assuming the B60 defaults.
+        # Priority: a value persisted for this exact card → else, if nothing is applied
+        # at boot (no OC conf), the live driver values ARE stock, so capture + persist.
+        saved = self._stock_load().get(self._card_id)
+        if saved:
+            if self.f_mem is not None and "mem" in saved:   self.mem_stock  = int(saved["mem"])
+            if self.f_temp is not None and "temp" in saved: self.temp_stock = int(saved["temp"])
+            return
+        if not os.path.exists("/etc/xe-gpu-oc.conf"):
+            if self.f_mem is not None:
+                m = self.gpu.read_mem_speed()
+                if m: self.mem_stock = int(m)
+            if self.f_temp is not None:
+                t = self.gpu.read_temp_limit()
+                if t: self.temp_stock = int(t)
+            self._stock_save(getattr(self, "mem_stock", None) if self.f_mem is not None else None,
+                             getattr(self, "temp_stock", None) if self.f_temp is not None else None)
+        else:
+            # an OC is persisted and we've never seen this card clean — can't be sure of
+            # true stock. Keep the fallback defaults; a stock benchmark will calibrate it.
+            self._stock_uncalibrated = True
 
     def _apply_oc_gate(self, functional):
         # The voltage-curve / memory-speed / temperature-limit controls ride on the
@@ -1754,6 +1787,34 @@ class VoltageCurveView(Gtk.Box):
             return
         self._run_stress()
 
+    def _bench_stock(self, *_):
+        # explicit "Stock bench" button: confirm, then measure the stock baseline
+        if self._testing:
+            return
+        if not getattr(self, "stock", None):
+            self.window.toast("GPU settings not loaded yet"); return
+        note = ("" if not self._stock_uncalibrated else
+                "\n\nThis card has an overclock persisted and hasn't been seen at stock, so "
+                "this run also calibrates what 'stock' means for it.")
+        dlg = Adw.MessageDialog(
+            transient_for=self.window, heading="Benchmark stock baseline?",
+            body=("Runs the full benchmark at this card's stock settings to record the "
+                  "baseline that overclocks are compared against. Your applied settings "
+                  "aren't changed — stock is applied only for the duration of the test." + note))
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("go", "Benchmark stock")
+        dlg.set_response_appearance("go", Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_default_response("go"); dlg.set_close_response("cancel")
+        dlg.connect("response", lambda d, r: self._bench_stock_go() if r == "go" else None)
+        dlg.present()
+
+    def _bench_stock_go(self):
+        # a stock baseline is only useful with the full metrics, so turn Benchmark on
+        # and route through the normal gating (loader install / benchmark setup).
+        self._force_stock = True
+        self.bench_chk.set_active(True)
+        self._stress()
+
     def _bench_ready(self):
         return bool(shutil.which("clpeak")) and \
             os.path.isdir(os.path.expanduser("~/ovbench/model"))
@@ -1876,14 +1937,23 @@ class VoltageCurveView(Gtk.Box):
         self._status_win = self._status_lbl = None
 
     def _run_stress(self):
+        force_stock = self._force_stock          # set by _bench_stock_go; measure the stock baseline
+        self._force_stock = False
         self._testing = True
         self.test_btn.set_sensitive(False); self.apply_btn.set_sensitive(False)
+        if getattr(self, "stockbench_btn", None):
+            self.stockbench_btn.set_sensitive(False)
         self.hint.set_text("stability test starting…")
-        self.window.toast(f"Stability test: current settings, {STRESS_SECS}s load (fan → max)…")
+        what = "stock baseline" if force_stock else "current settings"
+        self.window.toast(f"Stability test: {what}, {STRESS_SECS}s load (fan → max)…")
         # snapshot the settings identity for the (persisted) benchmark comparison
-        self._bench_label = self._settings_label()
-        self._bench_curkey = self._bench_keyval()
-        self._status_open(f"Stability test — {STRESS_SECS}s GPU load…")
+        if force_stock:
+            self._bench_label, self._bench_curkey = "stock", "stock"
+        else:
+            self._bench_label = self._settings_label()
+            self._bench_curkey = self._bench_keyval()
+        self._status_open(f"Stability test — {STRESS_SECS}s GPU load"
+                          + (" at stock…" if force_stock else "…"))
         # run via pkexec with --fan-guard: root ramps the fan to max + restores it, and
         # runs the workload as us (passing our session env so it can open the display).
         env = os.environ
@@ -1901,12 +1971,16 @@ class VoltageCurveView(Gtk.Box):
         # the live OC, applies these directly to sysfs — NOT persisted — for the test,
         # and restores them after, so a hang can't leave an unstable OC saved for boot.
         if getattr(self, "stock", None):
-            tgt = self._target_curve()
+            # force_stock measures the baseline: apply the stock curve/mem/temp transiently
+            # (the harness restores whatever is live afterwards, so an applied OC is untouched).
+            tgt = list(self.stock) if force_stock else self._target_curve()
             cmd += ["--oc-curve", " ".join(f"{i}:{mv}" for i, mv in enumerate(tgt))]
             if self.f_mem is not None:
-                cmd += ["--oc-mem", str(int(self.f_mem.value * 1000))]
+                memv = self.mem_stock if force_stock else int(self.f_mem.value * 1000)
+                cmd += ["--oc-mem", str(int(memv))]
             if self.f_temp is not None:
-                cmd += ["--oc-temp", str(int(self.f_temp.value))]
+                tempv = self.temp_stock if force_stock else int(self.f_temp.value)
+                cmd += ["--oc-temp", str(int(tempv))]
         if self.bench_chk.get_active():
             cmd += ["--benchmark"]    # opt-in: also run clpeak + LLM benchmarks
 
@@ -1947,25 +2021,30 @@ class VoltageCurveView(Gtk.Box):
         self._testing = False
         self._status_close()
         self.test_btn.set_sensitive(True); self.apply_btn.set_sensitive(True)
+        if getattr(self, "stockbench_btn", None):
+            self.stockbench_btn.set_sensitive(True)
         st = s.get("STATUS", "error")
         mt, mnf, mxf = s.get("MAXTEMP", "?"), s.get("MINFREQ", "?"), s.get("MAXFREQ", "?")
         key = getattr(self, "_bench_curkey", "")
         lbl = getattr(self, "_bench_label", "these settings")
         is_stock = (key == "stock")
+        cardid = getattr(self, "_card_id", "-")
         # LLM produced garbage under load -> memory corruption signature (tok/s can
         # look fine while the output is wrong). On an overclock that's a hard fail.
         llm_incoherent = (s.get("LLMCOHERENT") == "0")
         def _num(x): return x if (x and str(x).isdigit()) else None
 
         # ---- build the persisted record + stock-comparison table ----
-        rows = None; base = None; footer = ""; runs = None; rec = None
+        rows = None; base = None; footer = ""; runs = None; rec = None; offer_stock = False
         score = s.get("SCORE")
         if _num(score):
             runs = self._bench_load()
-            stock_runs = [r for r in runs if r.get("key") == "stock" and r.get("score")]
+            # compare only within the SAME card (legacy records lack "gpu" -> assume this card)
+            stock_runs = [r for r in runs if r.get("gpu", cardid) == cardid
+                          and r.get("key") == "stock" and r.get("score")]
             base = stock_runs[-1] if stock_runs else None
-            rec = {"ts": int(time.time()), "key": key, "label": lbl, "score": int(score),
-                   "temp": mt, "minf": mnf, "maxf": mxf, "status": st}
+            rec = {"ts": int(time.time()), "gpu": cardid, "key": key, "label": lbl,
+                   "score": int(score), "temp": mt, "minf": mnf, "maxf": mxf, "status": st}
             for k, v in (("avgfreq", s.get("AVGFREQ")), ("avgpower", s.get("AVGPOWER")),
                          ("memspeed", s.get("MEMSPEED")), ("membw", s.get("MEMBW")),
                          ("compute", s.get("COMPUTE")), ("llmpre", s.get("LLMPREFILL")),
@@ -1973,10 +2052,17 @@ class VoltageCurveView(Gtk.Box):
                 if _num(v): rec[k] = int(v)
             rows = self._bench_table_rows(rec, base)
             if is_stock:
-                footer = "Saved as your stock baseline — overclock and test again to see the gain."
+                footer = "Saved as this card's stock baseline — overclock and test again to see the gain."
+                # a stock run is authoritative for what "stock" means: persist the calibration
+                if _num(s.get("MEMSPEED")) or self.f_mem is not None:
+                    self._stock_save(int(s["MEMSPEED"]) if _num(s.get("MEMSPEED")) else
+                                     getattr(self, "mem_stock", None),
+                                     getattr(self, "temp_stock", None) if self.f_temp is not None else None)
+                    self._stock_uncalibrated = False
             elif base is None:
-                footer = ("No stock baseline yet — reset to stock and run the test once so future "
-                          "overclock runs can be compared against it.")
+                footer = ("No stock baseline for this card yet — run one so overclock runs can be "
+                          "compared against it.")
+                offer_stock = True
 
         # ---- non-result outcomes ----
         if st == "no_workload":
@@ -2022,7 +2108,8 @@ class VoltageCurveView(Gtk.Box):
         if rows is not None:
             runs.append(rec); self._bench_save(runs)
             self._result_table_dialog(heading, summary, rows,
-                                      has_base=base is not None, footer=footer)
+                                      has_base=base is not None, footer=footer,
+                                      offer_stock=offer_stock)
         else:
             body = summary + f"\n\nPeak temp:  {mt}°C\nClocks:  {mnf}–{mxf} MHz"
             self._result_dialog(heading, body)
@@ -2072,7 +2159,7 @@ class VoltageCurveView(Gtk.Box):
         dlg.set_default_response("ok"); dlg.set_close_response("ok")
         dlg.present()
 
-    def _result_table_dialog(self, heading, summary, rows, has_base, footer=""):
+    def _result_table_dialog(self, heading, summary, rows, has_base, footer="", offer_stock=False):
         dlg = Adw.MessageDialog(transient_for=self.window, heading=heading, body=summary)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         grid = Gtk.Grid(column_spacing=18, row_spacing=6)
@@ -2097,10 +2184,40 @@ class VoltageCurveView(Gtk.Box):
             box.append(f)
         dlg.set_extra_child(box)
         dlg.add_response("ok", "Close")
+        if offer_stock:
+            dlg.add_response("stock", "Benchmark stock now")
+            dlg.set_response_appearance("stock", Adw.ResponseAppearance.SUGGESTED)
+            dlg.connect("response", lambda d, r: self._bench_stock_go() if r == "stock" else None)
         dlg.set_default_response("ok"); dlg.set_close_response("ok")
         dlg.present()
 
     BENCH_PATH = os.path.expanduser("~/.config/xe-gpu-arc/benchmarks.json")
+    STOCK_PATH = os.path.expanduser("~/.config/xe-gpu-arc/stock.json")
+
+    def _stock_load(self):
+        try:
+            with open(self.STOCK_PATH) as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+
+    def _stock_save(self, mem, temp):
+        # persist this card's stock defaults keyed by GPU id (per-card, portable)
+        try:
+            d = self._stock_load()
+            e = d.get(self._card_id, {})
+            if mem is not None:  e["mem"] = int(mem)
+            if temp is not None: e["temp"] = int(temp)
+            e["ts"] = int(time.time())
+            d[self._card_id] = e
+            os.makedirs(os.path.dirname(self.STOCK_PATH), exist_ok=True)
+            tmp = self.STOCK_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(d, f, indent=1)
+            os.replace(tmp, self.STOCK_PATH)
+        except Exception:
+            pass
 
     def _is_stock(self):
         # True when the settings under test equal the card's stock/default:
