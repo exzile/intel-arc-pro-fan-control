@@ -4,8 +4,9 @@ This documents adding a second card — an **Arc Pro B70 (Battlemage G31, `8086:
 alongside the existing **B60 (G21, `8086:e211`, 24 GB)**, on an older **ASUS ROG STRIX Z370-H
 (Coffee Lake)** board. Two separate problems: **(1)** getting the B70 to bind to `xe` at all, and
 **(2)** whether the reverse-engineered OC path works on the G31 die. TL;DR: **(1) solved and made
-persistent; (2) the G31 rejects the whole OC-write PCODE surface — fan/power/clock work, the VF
-curve / mem-speed / temp-limit do not.**
+persistent; (2) this G31 card rejects the B60's OC-write PCODE surface — fan/power/clock work, the VF
+curve / mem-speed / temp-limit do not on the B60 path. A later external report (see Conclusion) shows
+at least some B70 boards do have an alternate custom-VF path, so this is not universal.**
 
 Reference: kernel `7.0.0-27-generic`, Linux `xe` driver, both cards on CPU PCIe root ports.
 
@@ -161,9 +162,11 @@ This is the same wall we started at for the B60, and the same tool breaks it:
    sequence the way the B60's was found (the missing `0x5f/2` begin), then replay it via `oc/pcode_probe`.
    But the gating check killed it: **the Windows Intel Graphics Software app has a Tuning/OC section for
    the B60 but *none* for the B70.** So the Windows driver never overclocks the B70 → it never emits a
-   G31 OC sequence → **there is nothing to capture, on any platform.** The Linux `-71` is therefore
-   **by design**: Intel gates OC on the B70/G31 at the firmware+driver level (opcodes firmware-disabled,
-   no OC UI/driver path to enable them) — consistent with the marginal `1062` firmware bump.
+   G31 OC sequence → **there is nothing to capture, on any platform.** On the card tested here the
+   Linux `-71` therefore looks like Intel gating OC at the firmware+driver level (opcodes
+   firmware-disabled, no OC UI/driver path to enable them) — consistent with the marginal `1062`
+   firmware bump. See the Conclusion for a later external report that this gate is **not** universal
+   across every B70 firmware/board combination.
 
 ## Conclusion
 
@@ -173,8 +176,9 @@ external testing on an ASRock Arc Pro B70 Creator (`8086:e223`, subsystem `1849:
 B70 undervolting is not categorically impossible: it uses a different Windows-derived custom-VF
 transaction.
 
-That external B70 sequence was captured from a successful Windows
-`ctlOverclockWriteCustomVFCurve` run and then replayed successfully on Linux:
+That external B70 sequence was reportedly captured from a successful Windows
+`ctlOverclockWriteCustomVFCurve` run and then replayed on Linux (third-party report, not yet
+reproduced on the hardware in this repo):
 
 ```text
 0x5F p1=4 p2=0 data0=1
@@ -198,12 +202,14 @@ universal statement that every B70/G31 firmware/board combination lacks a custom
 What still works independently of this OC-path difference is **fan control, power cap, clock
 limits, and full telemetry** — all validated and multi-GPU-isolated.
 
-**Confirmed by decompiling the Windows app** (`ilspycmd` on the WinUI3 Intel Graphics Software): its
-tuning UI is *generated* from `ctlOverclockGetProperties(adapter).bSupported`. When that IGCL flag is
-`0` it logs *"Overclocking not supported by adapter"* and returns an empty property list → **no tuning
-section is ever built** (not hidden/greyed). There is **no app-side SKU/device allowlist** — the B70
-simply reports `bSupported = 0` from IGCL → KMD → firmware, the same gate as the Linux `-71`. So the
-missing B70 tuning is a faithful reflection of a driver/firmware capability, not an app quirk.
+**On the Windows-app decompile** (`ilspycmd` on the WinUI3 Intel Graphics Software): its tuning UI is
+*generated* from `ctlOverclockGetProperties(adapter).bSupported`. When that IGCL flag is `0` it logs
+*"Overclocking not supported by adapter"* and returns an empty property list → **no tuning section is
+ever built** (not hidden/greyed). There is **no app-side SKU/device allowlist**. On the B70/G31 tested
+*here*, `bSupported` came back `0` from IGCL → KMD → firmware — the same gate as the Linux `-71` on
+this card. The external report above indicates that gate is **not** universal across B70 firmware/board
+combinations, so the missing tuning section reflects the capability reported by *this* card's
+driver/firmware stack rather than a fixed property of every B70.
 
 If Intel later ships B70 OC (it's a Q1.26-new card), the door reopens with **zero rework**: re-check
 the app for a B70 tuning section; if it appears, DTrace `fbt:igdkmdnd64:*004c5310:entry` while tuning
