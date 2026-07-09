@@ -1311,7 +1311,7 @@ class VoltageCurveView(Gtk.Box):
                         "GDDR6 video-memory data rate. More bandwidth helps memory-bound "
                         "workloads; raise in small steps and run the stability test.")
             mgrid = Gtk.Grid(column_spacing=12, row_spacing=10)
-            self.mem_applied = 19000
+            self.mem_applied = 19000; self.mem_stock = 19000
             self.f_mem = SliderField(
                 mgrid, 0, "drive-harddisk-symbolic", "Memory speed",
                 14.0, 24.0, 0.1, 19.0, "Gbps", digits=2,
@@ -1326,7 +1326,7 @@ class VoltageCurveView(Gtk.Box):
                         "GPU thermal-throttle target. Raise it to hold boost clocks longer under "
                         "load; lower it to run cooler and quieter.")
             tgrid = Gtk.Grid(column_spacing=12, row_spacing=10)
-            self.temp_applied = 100
+            self.temp_applied = 100; self.temp_stock = 100
             self.f_temp = SliderField(
                 tgrid, 0, "dialog-warning-symbolic", "Temp limit",
                 60, 100, 1, 100, "°C",
@@ -2102,9 +2102,23 @@ class VoltageCurveView(Gtk.Box):
 
     BENCH_PATH = os.path.expanduser("~/.config/xe-gpu-arc/benchmarks.json")
 
+    def _is_stock(self):
+        # True when the settings under test equal the card's stock/default:
+        # no voltage offset, and mem/temp at their defaults. Used so a stock
+        # run is keyed "stock" (the baseline) rather than a settings hash.
+        if not getattr(self, "stock", None):
+            return True                       # baseline not loaded yet
+        if self.mode != "offset" or int(self.f_off.value) != 0:
+            return False
+        if self.f_mem is not None and int(round(self.f_mem.value * 1000)) != self.mem_stock:
+            return False
+        if self.f_temp is not None and int(self.f_temp.value) != self.temp_stock:
+            return False
+        return True
+
     def _settings_label(self):
         # short human label of the overclock under test
-        if not getattr(self, "stock", None):
+        if self._is_stock():
             return "stock"
         v = (f"{int(self.f_off.value):+d}mV" if int(self.f_off.value) else "stock V") \
             if self.mode == "offset" else "custom curve"
@@ -2114,7 +2128,7 @@ class VoltageCurveView(Gtk.Box):
 
     def _bench_keyval(self):
         # stable signature of the settings under test (curve + mem + temp)
-        if not getattr(self, "stock", None):
+        if self._is_stock():
             return "stock"
         parts = [",".join(str(v) for v in self._target_curve())]
         if self.f_mem is not None:  parts.append("m%d" % int(self.f_mem.value * 1000))
