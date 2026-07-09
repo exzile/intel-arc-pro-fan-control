@@ -56,17 +56,34 @@ PY
 
 echo "==> write llmbench.py"
 cat > "$DIR/llmbench.py" <<'PY'
-import sys, openvino_genai as og
+import sys, re, openvino_genai as og
 model, device = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "GPU")
 pipe = og.LLMPipeline(model, device)
 cfg = og.GenerationConfig(max_new_tokens=128, ignore_eos=True)
 prompt = "Explain how a CPU executes instructions, step by step."
 pipe.generate([prompt], cfg)                 # warmup (compiles for the GPU)
-m = pipe.generate([prompt], cfg).perf_metrics
+res = pipe.generate([prompt], cfg)
+m = res.perf_metrics
 intok, ttft_ms = m.get_num_input_tokens(), m.get_ttft().mean
 print("PREFILL=%.1f" % (intok / (ttft_ms / 1000.0) if ttft_ms > 0 else 0))
 print("DECODE=%.1f" % m.get_throughput().mean)
 print("INTOK=%d OUTTOK=%d TTFT_ms=%.0f" % (intok, m.get_num_generated_tokens(), ttft_ms))
+
+# Coherence check: an unstable *memory* overclock corrupts data silently — the
+# tok/s stay high but the generated text degrades into repetition / gibberish.
+# Flag that so a fast-but-wrong overclock gets caught instead of looking like a win.
+try:
+    text = (res.texts[0] if getattr(res, "texts", None) else str(res)).strip()
+except Exception:
+    text = ""
+words = re.findall(r"\S+", text.lower())
+uniq = len(set(words)) / len(words) if words else 0.0
+run = best = 1                               # longest immediate-repeat streak
+for a, b in zip(words, words[1:]):
+    run = run + 1 if a == b else 1
+    if run > best: best = run
+coherent = 1 if (len(words) >= 8 and uniq >= 0.35 and best <= 6) else 0
+print("COHERENT=%d UNIQ=%.2f REP=%d" % (coherent, uniq, best))
 PY
 
 echo "==> smoke test on GPU"

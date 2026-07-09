@@ -215,13 +215,15 @@ fi
 # real LLM throughput on the GPU via OpenVINO GenAI, if set up (see
 # scripts/setup-llm-benchmark.sh): prefill (compute-bound) + decode (memory-
 # bandwidth-bound) tok/s, measured with the OC still applied.
-LLMPRE=""; LLMDEC=""
+LLMPRE=""; LLMDEC=""; LLMOK=""
 LLMH="/home/${RUNUSER:-joey}/ovbench"
 if [ "$BENCH" = 1 ] && [ -x "$LLMH/bin/python" ] && [ -f "$LLMH/llmbench.py" ] && [ -d "$LLMH/model" ]; then
   echo "PHASE llm"
   LO=$(timeout 90 "$LLMH/bin/python" "$LLMH/llmbench.py" "$LLMH/model" GPU 2>/dev/null)
   LLMPRE=$(printf '%s\n' "$LO" | awk -F= '/^PREFILL=/{printf "%.0f",$2; exit}')
   LLMDEC=$(printf '%s\n' "$LO" | awk -F= '/^DECODE=/{printf "%.0f",$2; exit}')
+  # coherence flag: 0 = garbage output (memory-corruption signature under OC)
+  LLMOK=$(printf '%s\n' "$LO" | awk '/^COHERENT=/{print $1; exit}' | cut -d= -f2)
 fi
 
 # benchmark score = average of the FPS figures the load tool reported (glmark2 /
@@ -258,6 +260,7 @@ echo "AVGPOWER=$AVGP"
 [ -n "$COMPUTE" ] && echo "COMPUTE=$COMPUTE"
 [ -n "$LLMPRE" ] && echo "LLMPREFILL=$LLMPRE"
 [ -n "$LLMDEC" ] && echo "LLMDECODE=$LLMDEC"
+[ -n "$LLMOK" ]  && echo "LLMCOHERENT=$LLMOK"
 case "$ST" in
   ok)        echo "stable: ${SECS}s load, peak ${MAXT}C, clocks ${MINF}-${MAXF} MHz, no hang"; exit 0 ;;
   throttled) echo "throttled: hit ${MAXT}C (limit ${TLIMIT}C) - stable but thermally capped";  exit 0 ;;

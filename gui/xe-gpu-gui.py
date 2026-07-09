@@ -1949,91 +1949,153 @@ class VoltageCurveView(Gtk.Box):
         self.test_btn.set_sensitive(True); self.apply_btn.set_sensitive(True)
         st = s.get("STATUS", "error")
         mt, mnf, mxf = s.get("MAXTEMP", "?"), s.get("MINFREQ", "?"), s.get("MAXFREQ", "?")
-        # ---- metrics block + persisted benchmark comparison ----
-        avgf, avgp = s.get("AVGFREQ"), s.get("AVGPOWER")
-        memsp, membw, comp = s.get("MEMSPEED"), s.get("MEMBW"), s.get("COMPUTE")
-        llmpre, llmdec = s.get("LLMPREFILL"), s.get("LLMDECODE")
+        key = getattr(self, "_bench_curkey", "")
+        lbl = getattr(self, "_bench_label", "these settings")
+        is_stock = (key == "stock")
+        # LLM produced garbage under load -> memory corruption signature (tok/s can
+        # look fine while the output is wrong). On an overclock that's a hard fail.
+        llm_incoherent = (s.get("LLMCOHERENT") == "0")
         def _num(x): return x if (x and str(x).isdigit()) else None
-        rows = [f"Duration:  {STRESS_SECS}s at full load", f"Peak temp:  {mt}°C"]
-        rows.append(f"Clocks:  {mnf}–{mxf} MHz" + (f"  (avg {avgf})" if _num(avgf) else ""))
-        if _num(avgp): rows.append(f"Power:  {avgp} W avg")
-        mem = f"{int(memsp)/1000:.1f} Gbps" if _num(memsp) else ""
-        if _num(membw): mem += (" · " if mem else "") + f"{membw} GB/s"
-        if mem: rows.append(f"Memory:  {mem}")
-        if _num(comp): rows.append(f"Compute:  {int(comp)/1000:.1f} TFLOPS")
-        if _num(llmdec):
-            rows.append(f"LLM (1.5B):  {llmpre or '?'} tok/s prefill · {llmdec} tok/s decode")
-        elif _num(membw) or _num(comp):
-            # proxy framing when the real LLM benchmark isn't set up
-            llm = "LLM:  " + ("decode ∝ %s GB/s" % membw if _num(membw) else "")
-            if _num(comp): llm += ("   " if _num(membw) else "") + f"prefill ∝ {int(comp)/1000:.1f} TFLOPS"
-            rows.append(llm)
-        metrics = "\n".join(rows)
 
-        bench = ""
+        # ---- build the persisted record + stock-comparison table ----
+        rows = None; base = None; footer = ""; runs = None; rec = None
         score = s.get("SCORE")
-        if st in ("ok", "throttled") and _num(score):
-            cur = int(score); key = getattr(self, "_bench_curkey", "")
-            lbl = getattr(self, "_bench_label", "these settings")
+        if _num(score):
             runs = self._bench_load()
-            diff = [r for r in runs if r.get("key") != key and r.get("score")]
-            arr = lambda d: "▲" if d > 0.5 else ("▼" if d < -0.5 else "≈")
-            pct = lambda a, b: (a - b) / b * 100.0 if b else 0.0
-            if diff:
-                p = diff[-1]; d = pct(cur, p["score"])
-                bench = (f"\n\nBenchmark  vs previous ({p.get('label', '?')})\n"
-                         f"  FPS:  {cur}  {arr(d)} {d:+.1f}%  (was {p['score']})")
-                if _num(membw) and p.get("membw"):
-                    db = pct(int(membw), p["membw"])
-                    bench += f"\n  VRAM BW:  {membw} GB/s  {arr(db)} {db:+.1f}%  (was {p['membw']})"
-                if _num(llmdec) and p.get("llmdec"):
-                    dl = pct(int(llmdec), p["llmdec"])
-                    bench += f"\n  LLM decode:  {llmdec} tok/s  {arr(dl)} {dl:+.1f}%  (was {p['llmdec']})"
-            else:
-                bench = ("\n\nBenchmark saved: " + f"{cur} fps"
-                         + (f" · {membw} GB/s VRAM" if _num(membw) else "")
-                         + "\nChange settings and test again to compare.")
-            rec = {"ts": int(time.time()), "key": key, "label": lbl, "score": cur,
+            stock_runs = [r for r in runs if r.get("key") == "stock" and r.get("score")]
+            base = stock_runs[-1] if stock_runs else None
+            rec = {"ts": int(time.time()), "key": key, "label": lbl, "score": int(score),
                    "temp": mt, "minf": mnf, "maxf": mxf, "status": st}
-            for k, v in (("avgfreq", avgf), ("avgpower", avgp), ("memspeed", memsp),
-                         ("membw", membw), ("compute", comp), ("llmpre", llmpre), ("llmdec", llmdec)):
+            for k, v in (("avgfreq", s.get("AVGFREQ")), ("avgpower", s.get("AVGPOWER")),
+                         ("memspeed", s.get("MEMSPEED")), ("membw", s.get("MEMBW")),
+                         ("compute", s.get("COMPUTE")), ("llmpre", s.get("LLMPREFILL")),
+                         ("llmdec", s.get("LLMDECODE"))):
                 if _num(v): rec[k] = int(v)
-            runs.append(rec); self._bench_save(runs)
+            rows = self._bench_table_rows(rec, base)
+            if is_stock:
+                footer = "Saved as your stock baseline — overclock and test again to see the gain."
+            elif base is None:
+                footer = ("No stock baseline yet — reset to stock and run the test once so future "
+                          "overclock runs can be compared against it.")
+
+        # ---- non-result outcomes ----
         if st == "no_workload":
             self.window.toast("Install glmark2 or vkmark to run a stability test", ms=4000)
-        elif st == "cancelled":
-            self.window.toast("Stability test cancelled")
-        elif st == "error":
-            self.window.toast("Stability test could not start")
-        elif st == "unstable":
-            self._result_dialog(
-                "Unstable under load ✗",
-                f"A GPU hang or crash was detected under sustained load — this "
-                f"overclock is NOT stable.\n\n"
-                f"Duration:  {STRESS_SECS}s at full load\n"
-                f"Peak temp:  {mt}°C\n\n"
-                f"Reverting to stock settings.")
+            self._hint(); return False
+        if st == "cancelled":
+            self.window.toast("Stability test cancelled"); self._hint(); return False
+        if st == "error":
+            self.window.toast("Stability test could not start"); self._hint(); return False
+
+        # ---- hard fail: hang, OR corrupt LLM output under an overclock ----
+        if st == "unstable" or (llm_incoherent and not is_stock):
+            if st == "unstable":
+                heading = "Unstable under load ✗"
+                body = (f"A GPU hang or crash was detected under sustained load — this "
+                        f"overclock is NOT stable.\n\nPeak temp:  {mt}°C\n\n"
+                        f"Reverting to stock settings.")
+            else:
+                heading = "Unstable — corrupt LLM output ✗"
+                body = ("No hang, but the LLM benchmark produced incoherent output "
+                        "(repetition/gibberish) under this overclock. That's the signature "
+                        "of memory corruption from an unstable memory clock — the tokens/sec "
+                        "may look fine but the results are wrong.\n\n"
+                        "Reverting to stock. Back off the memory overclock and retest.")
+            self._result_dialog(heading, body)
             run_priv(["xe-gpu-oc", "reset"], self.window,
                      lambda: (setattr(self, "applied", 0),
                               setattr(self, "applied_curve", None), self._load()))
-        elif st == "throttled":
-            self._result_dialog(
-                "Stable, but thermally throttled ⚠",
-                "Ran the full load with no hang, but the GPU hit its temperature "
-                f"limit ({s.get('TEMPLIMIT', '?')}°C) and lowered clocks to stay safe."
-                "\n\n" + metrics + bench)
+            self._hint(); return False
+
+        # ---- genuine pass / throttled: persist + show the comparison table ----
+        if st == "throttled":
+            heading = "Stable, but thermally throttled ⚠"
+            summary = ("Ran the full load with no hang, but the GPU hit its temperature "
+                       f"limit ({s.get('TEMPLIMIT', '?')}°C) and lowered clocks to stay safe.")
         else:
-            self._result_dialog(
-                "Stability test passed ✓",
-                "Ran the full load with no hang or crash — this overclock looks "
-                "stable.\n\n" + metrics + bench)
-        if s.get("NOTE") and st in ("ok", "throttled"):
+            heading = "Stability test passed ✓"
+            summary = (f"Ran the full {STRESS_SECS}s load with no hang or crash — this "
+                       "overclock looks stable.")
+        if is_stock and llm_incoherent:
+            footer = ("⚠ The LLM benchmark output looks incoherent even at stock — the model "
+                      "may be mis-set-up rather than an overclock fault. " + footer)
+        if rows is not None:
+            runs.append(rec); self._bench_save(runs)
+            self._result_table_dialog(heading, summary, rows,
+                                      has_base=base is not None, footer=footer)
+        else:
+            body = summary + f"\n\nPeak temp:  {mt}°C\nClocks:  {mnf}–{mxf} MHz"
+            self._result_dialog(heading, body)
+        if s.get("NOTE"):
             self.window.toast(s["NOTE"], ms=5500)
         self._hint()
         return False
 
+    def _bench_table_rows(self, rec, base):
+        # rows for the result table: (metric, this-run, stock, Δ-text, Δ-css-class)
+        def fnum(d, k):
+            try: return float(d.get(k))
+            except (TypeError, ValueError, AttributeError): return None
+        specs = [  # (label, key, better: +1 higher-is-better / -1 lower-is-better, fmt)
+            ("FPS (graphics)", "score",    +1, lambda v: f"{int(v)}"),
+            ("VRAM bandwidth", "membw",    +1, lambda v: f"{int(v)} GB/s"),
+            ("Compute",        "compute",  +1, lambda v: f"{v/1000:.1f} TFLOPS"),
+            ("LLM decode",     "llmdec",   +1, lambda v: f"{int(v)} tok/s"),
+            ("LLM prefill",    "llmpre",   +1, lambda v: f"{int(v)} tok/s"),
+            ("Memory speed",   "memspeed", +1, lambda v: f"{v/1000:.1f} Gbps"),
+            ("Avg clock",      "avgfreq",  +1, lambda v: f"{int(v)} MHz"),
+            ("Avg power",      "avgpower", -1, lambda v: f"{int(v)} W"),
+            ("Peak temp",      "temp",     -1, lambda v: f"{int(v)} °C"),
+        ]
+        rows = []
+        for name, k, better, fmt in specs:
+            cv = fnum(rec, k)
+            if cv is None: continue
+            bv = fnum(base, k) if base else None
+            if bv:
+                pct = (cv - bv) / bv * 100.0
+                if abs(pct) < 0.5:
+                    dtxt, cls = "≈", "dim-label"
+                else:
+                    up = pct > 0
+                    good = (up and better > 0) or ((not up) and better < 0)
+                    dtxt = ("▲ " if up else "▼ ") + f"{pct:+.1f}%"
+                    cls = "success" if good else "error"
+                rows.append((name, fmt(cv), fmt(bv), dtxt, cls))
+            else:
+                rows.append((name, fmt(cv), "—", "", "dim-label"))
+        return rows
+
     def _result_dialog(self, heading, body):
         dlg = Adw.MessageDialog(transient_for=self.window, heading=heading, body=body)
+        dlg.add_response("ok", "Close")
+        dlg.set_default_response("ok"); dlg.set_close_response("ok")
+        dlg.present()
+
+    def _result_table_dialog(self, heading, summary, rows, has_base, footer=""):
+        dlg = Adw.MessageDialog(transient_for=self.window, heading=heading, body=summary)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        grid = Gtk.Grid(column_spacing=18, row_spacing=6)
+        hdr = ["Metric", "This run"] + (["Stock", "Δ"] if has_base else [])
+        for c, t in enumerate(hdr):
+            l = Gtk.Label(label=t, xalign=(0.0 if c == 0 else 1.0))
+            l.add_css_class("heading"); l.add_css_class("caption")
+            grid.attach(l, c, 0, 1, 1)
+        for r, row in enumerate(rows, start=1):
+            name, cur, bval, dtxt, cls = row
+            cells = [(name, 0.0, "dim-label"), (cur, 1.0, "numeric")]
+            if has_base:
+                cells += [(bval, 1.0, "dim-label"), (dtxt, 1.0, cls)]
+            for c, (txt, xa, css) in enumerate(cells):
+                lab = Gtk.Label(label=txt, xalign=xa)
+                if css: lab.add_css_class(css)
+                grid.attach(lab, c, r, 1, 1)
+        box.append(grid)
+        if footer:
+            f = Gtk.Label(label=footer, xalign=0.0, wrap=True, max_width_chars=48)
+            f.add_css_class("dim-label")
+            box.append(f)
+        dlg.set_extra_child(box)
         dlg.add_response("ok", "Close")
         dlg.set_default_response("ok"); dlg.set_close_response("ok")
         dlg.present()
