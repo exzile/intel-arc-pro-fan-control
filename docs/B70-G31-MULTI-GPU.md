@@ -131,6 +131,30 @@ sequence** (or gates it differently on the workstation SKU).
 >
 > Net: the B70 OC path is gated at the begin unlock, not categorically absent.
 
+> **Update — board-policy conclusion (2026-07, resolved via issue #1 + forcewake-held retest).**
+> The custom-VF path is **board/subsystem-specific, not universal**. It works on **ASRock Arc Pro
+> B70 Creator (`1849:6020`)** cards, where the VF table is provisioned and `0x5d/8/0x13` is
+> cold-readable. On an **Intel-reference B70 (`8086:1701`)** the entire `0x5d` VF domain returns
+> **`-71`** cold and the begin `0x5f/3` step is refused — the table is **unprovisioned/locked by
+> board-firmware policy**, not merely gated by a missing unlock sequence.
+>
+> Corroborated by the issue #1 reporter (MidasMining) and by
+> [PCGamesHardware's B70 review](https://www.pcgameshardware.de/Arc-Pro-B70-Grafikkarte-284242/Tests/Building-an-Arc-B780-Can-We-Beat-the-RTX-5070-and-RX-9070-1545269/),
+> which notes the Intel reference card locks the tuning menu in Intel's own driver while the ASRock
+> board exposes power/clock/voltage/fan controls in its vendor tooling.
+>
+> The reporter's "policy/waiver" is the `0x5f/4 -> 0x5f/3 -> 0x5f/2` provision sequence; on the
+> `8086:1701` board `0x5f/3` returns `-71` — that *is* the policy gate. Their current production
+> path uses no waiver at all — it relies on the cold `0x13` read working, which this board does
+> not allow.
+>
+> **Forcewake retest:** re-ran the cold `0x5d/8/0x13`, `0x5d/8/0x13` (index 1), and `0x5e/8/0x73`
+> probes on the Intel-reference B70 with GT forcewake explicitly held (`XE_FORCEWAKE_ALL`,
+> confirmed acquired) around the mailbox read. Result unchanged: **`-71`** on all three, identical
+> to the no-forcewake baseline, while the B60 on the same host returns `ret=0` with forcewake held
+> either way. Forcewake was not the variable — this is a pcode-level policy rejection, not a
+> power-well/access-timing issue.
+
 ### Reverse-engineering status / roadmap
 This is the same wall we started at for the B60, and the same tool breaks it:
 
