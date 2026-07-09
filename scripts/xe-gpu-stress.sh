@@ -18,7 +18,7 @@ set -uo pipefail
 SECS="${1:-60}"
 [[ "$SECS" =~ ^[0-9]+$ ]] || { echo "usage: xe-gpu-stress <seconds> [--fan-guard ...]"; exit 64; }
 shift || true
-RUNUSER=""; DISP=""; WLD=""; XRD=""; FANGUARD=0; DRIPRIME=""; OC_CURVE=""; OC_MEM=""; OC_TEMP=""
+RUNUSER=""; DISP=""; WLD=""; XRD=""; FANGUARD=0; DRIPRIME=""; OC_CURVE=""; OC_MEM=""; OC_TEMP=""; WLOUT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --fan-guard) FANGUARD=1; shift ;;
@@ -104,7 +104,7 @@ oc_test_restore(){
   [ -n "$OC_S_MEM"  ] && echo "$OC_S_MEM"  > "$OCM" 2>/dev/null
   [ -n "$OC_S_TEMP" ] && echo "$OC_S_TEMP" > "$TL"  2>/dev/null
 }
-trap 'oc_test_restore; fan_restore' EXIT
+trap 'oc_test_restore; fan_restore; rm -f "$WLOUT" 2>/dev/null' EXIT
 
 # choose a display workload appropriate for the session. The plain `glmark2` is
 # the X11/GLX build and will NOT open a display on a pure Wayland session, so on
@@ -147,11 +147,14 @@ oc_test_apply
 # Under --fan-guard we run as root, so drop to the target user (with their session
 # env) to open the display; otherwise run the workload directly.
 DRIENV=""; [ -n "$DRIPRIME" ] && DRIENV="DRI_PRIME=$DRIPRIME"
+# Capture the workload's stdout (line-buffered via stdbuf so FPS lines land during
+# the run, surviving the kill) to derive a benchmark score afterward.
+WLOUT="$(mktemp /tmp/xe-gpu-stress.XXXXXX 2>/dev/null || echo /tmp/xe-gpu-stress.out)"
 if [ "$FANGUARD" = 1 ] && [ "$(id -u)" -eq 0 ] && [ -n "$RUNUSER" ]; then
   setsid runuser -u "$RUNUSER" -- env DISPLAY="$DISP" WAYLAND_DISPLAY="$WLD" \
-    XDG_RUNTIME_DIR="$XRD" $DRIENV vblank_mode=0 __GL_SYNC_TO_VBLANK=0 $WL >/dev/null 2>&1 &
+    XDG_RUNTIME_DIR="$XRD" $DRIENV vblank_mode=0 __GL_SYNC_TO_VBLANK=0 stdbuf -oL $WL >"$WLOUT" 2>&1 &
 else
-  setsid env $DRIENV vblank_mode=0 __GL_SYNC_TO_VBLANK=0 $WL >/dev/null 2>&1 &
+  setsid env $DRIENV vblank_mode=0 __GL_SYNC_TO_VBLANK=0 stdbuf -oL $WL >"$WLOUT" 2>&1 &
 fi
 PID=$!
 sleep 1
@@ -171,6 +174,16 @@ done
 
 kill "$PID" 2>/dev/null; kill -- -"$PID" 2>/dev/null; wait "$PID" 2>/dev/null
 [ "$MINF" = 999999 ] && MINF=0
+
+# benchmark score = average of the FPS figures the load tool reported (glmark2 /
+# vkmark print "FPS: N" per scene). Same tool + scenes each run, so it's a valid
+# apples-to-apples number to compare across settings. glxgears prints none -> empty.
+SCORE=""
+if [ -s "$WLOUT" ]; then
+  SCORE=$(grep -oiE 'FPS:?[[:space:]]+[0-9]+' "$WLOUT" 2>/dev/null | grep -oE '[0-9]+$' \
+          | awk '{s+=$1; n++} END{if (n) printf "%d", s/n}')
+fi
+rm -f "$WLOUT"
 
 # a death within the first few seconds is a LAUNCH failure (no display / missing
 # driver), not an OC-induced hang -- real instability shows up under sustained load
@@ -199,6 +212,7 @@ echo "MINFREQ=$MINF"
 echo "MAXFREQ=$MAXF"
 echo "HANG=$HANG"
 echo "CRASH=$CRASH"
+[ -n "$SCORE" ] && { echo "SCORE=$SCORE"; echo "SCOREUNIT=fps"; }
 case "$ST" in
   ok)        echo "stable: ${SECS}s load, peak ${MAXT}C, clocks ${MINF}-${MAXF} MHz, no hang"; exit 0 ;;
   throttled) echo "throttled: hit ${MAXT}C (limit ${TLIMIT}C) - stable but thermally capped";  exit 0 ;;

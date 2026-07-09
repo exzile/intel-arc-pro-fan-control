@@ -1819,6 +1819,7 @@ class VoltageCurveView(Gtk.Box):
         self.test_btn.set_sensitive(False); self.apply_btn.set_sensitive(False)
         self.hint.set_text("stability test starting…")
         self.window.toast(f"Stability test: current settings, {STRESS_SECS}s load (fan → max)…")
+        self._bench_label = self._settings_label()   # snapshot for the benchmark comparison
         # run via pkexec with --fan-guard: root ramps the fan to max + restores it, and
         # runs the workload as us (passing our session env so it can open the display).
         env = os.environ
@@ -1874,6 +1875,20 @@ class VoltageCurveView(Gtk.Box):
         self.test_btn.set_sensitive(True); self.apply_btn.set_sensitive(True)
         st = s.get("STATUS", "error")
         mt, mnf, mxf = s.get("MAXTEMP", "?"), s.get("MINFREQ", "?"), s.get("MAXFREQ", "?")
+        # benchmark line: average FPS the load tool reported, vs the previous test
+        bench = ""
+        score = s.get("SCORE")
+        if st in ("ok", "throttled") and score and score.isdigit():
+            cur = int(score); prev = getattr(self, "_last_bench", None)
+            lbl = getattr(self, "_bench_label", "these settings")
+            if prev and prev.get("score"):
+                d = (cur - prev["score"]) / prev["score"] * 100.0
+                arrow = "▲" if d > 0.5 else ("▼" if d < -0.5 else "≈")
+                bench = (f"\n\nBenchmark:  {cur} fps   {arrow} {d:+.1f}%\n"
+                         f"vs previous  ({prev['label']}: {prev['score']} fps)")
+            else:
+                bench = f"\n\nBenchmark:  {cur} fps   (baseline — test again after a change to compare)"
+            self._last_bench = {"score": cur, "label": lbl}
         if st == "no_workload":
             self.window.toast("Install glmark2 or vkmark to run a stability test", ms=4000)
         elif st == "cancelled":
@@ -1898,7 +1913,7 @@ class VoltageCurveView(Gtk.Box):
                 f"limit and lowered clocks to stay safe.\n\n"
                 f"Duration:  {STRESS_SECS}s at full load\n"
                 f"Peak temp:  {mt}°C  (limit {s.get('TEMPLIMIT', '?')}°C)\n"
-                f"Clocks:  {mnf}–{mxf} MHz")
+                f"Clocks:  {mnf}–{mxf} MHz" + bench)
         else:
             self._result_dialog(
                 "Stability test passed ✓",
@@ -1906,13 +1921,22 @@ class VoltageCurveView(Gtk.Box):
                 f"stable.\n\n"
                 f"Duration:  {STRESS_SECS}s at full load\n"
                 f"Peak temp:  {mt}°C\n"
-                f"Clocks:  {mnf}–{mxf} MHz")
+                f"Clocks:  {mnf}–{mxf} MHz" + bench)
 
     def _result_dialog(self, heading, body):
         dlg = Adw.MessageDialog(transient_for=self.window, heading=heading, body=body)
         dlg.add_response("ok", "Close")
         dlg.set_default_response("ok"); dlg.set_close_response("ok")
         dlg.present()
+
+    def _settings_label(self):
+        # short label of the overclock under test, for the benchmark comparison
+        if not getattr(self, "stock", None):
+            return "stock"
+        if self.mode == "offset":
+            o = int(self.f_off.value)
+            return f"{o:+d} mV" if o else "stock"
+        return "custom curve"
         if s.get("NOTE") and st in ("ok", "throttled"):
             self.window.toast(s["NOTE"], ms=5500)
         self._hint()
