@@ -129,12 +129,16 @@ if [ -z "$WL" ]; then
   exit 3
 fi
 
-# best-effort GPU-hang counter from the kernel log (dmesg is often restricted -> -1 = unknown)
+# best-effort GPU-hang counter from the kernel log (dmesg is often restricted -> -1 = unknown).
+# Counts only SERIOUS faults. A per-engine "Engine reset: engine_class=…" is ROUTINE
+# recovery under heavy compute (clpeak / LLM inference trigger it even on stock) and
+# the GPU keeps running — that is NOT instability, so it is excluded.
 hang_count(){
   local out
   out=$(dmesg 2>/dev/null) || { echo -1; return; }
   [ -z "$out" ] && { echo -1; return; }
-  printf '%s\n' "$out" | grep -icE 'xe .*(reset|hang|wedged)'
+  printf '%s\n' "$out" | grep -iE 'xe .*(reset|hang|wedged)' \
+    | grep -icvE 'Engine reset: engine_class|vgaarb'
 }
 BASE=$(hang_count)
 
@@ -178,6 +182,18 @@ done
 kill "$PID" 2>/dev/null; kill -- -"$PID" 2>/dev/null; wait "$PID" 2>/dev/null
 [ "$MINF" = 999999 ] && MINF=0
 
+# --- STABILITY verdict from the LOAD ONLY, computed BEFORE the benchmark. The
+# benchmark's compute kernels (clpeak / LLM) trigger benign per-engine resets that
+# must NOT count as instability, so the hang check must not span them. ---
+if [ "$CRASH" = 1 ] && (( i < 3 )); then
+  echo "STATUS=error"
+  echo "workload '$WLNAME' failed to start (no display, or GL/Vulkan unavailable)"
+  exit 3
+fi
+NOW=$(hang_count); HANG=0
+[ "$BASE" != "-1" ] && [ "$NOW" != "-1" ] && (( NOW > BASE )) && HANG=1
+[ "$CRASH" = 1 ] && HANG=1
+
 # average clock + average power (from the energy counter delta over the run)
 AVGF=$(( i > 0 ? FSUM / i : 0 ))
 E1=$( [ -n "$HW" ] && cat "$HW/energy1_input" 2>/dev/null || echo 0 )
@@ -218,17 +234,6 @@ if [ -s "$WLOUT" ]; then
 fi
 rm -f "$WLOUT"
 
-# a death within the first few seconds is a LAUNCH failure (no display / missing
-# driver), not an OC-induced hang -- real instability shows up under sustained load
-if [ "$CRASH" = 1 ] && (( i < 3 )); then
-  echo "STATUS=error"
-  echo "workload '$WLNAME' failed to start (no display, or GL/Vulkan unavailable)"
-  exit 3
-fi
-
-NOW=$(hang_count); HANG=0
-[ "$BASE" != "-1" ] && [ "$NOW" != "-1" ] && (( NOW > BASE )) && HANG=1
-[ "$CRASH" = 1 ] && HANG=1
 THROT=0; (( MAXT >= TLIMIT )) && THROT=1
 
 if   [ "$HANG"  = 1 ]; then ST=unstable
