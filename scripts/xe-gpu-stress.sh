@@ -160,7 +160,8 @@ PID=$!
 sleep 1
 
 TLIMIT=$( [ -r "$TL" ] && cat "$TL" 2>/dev/null || echo 100 )
-MAXT=0; MINF=999999; MAXF=0; CRASH=0; i=0
+MAXT=0; MINF=999999; MAXF=0; CRASH=0; i=0; FSUM=0
+E0=$( [ -n "$HW" ] && cat "$HW/energy1_input" 2>/dev/null || echo 0 )   # for average power
 while [ "$i" -lt "$SECS" ]; do
   if ! kill -0 "$PID" 2>/dev/null; then CRASH=1; break; fi
   mhz=$(cat "$FREQ" 2>/dev/null || echo 0)
@@ -168,12 +169,29 @@ while [ "$i" -lt "$SECS" ]; do
   (( tc > MAXT )) && MAXT=$tc
   (( i >= 5 && mhz < MINF )) && MINF=$mhz   # ignore warm-up ramp for the low-clock floor
   (( mhz > MAXF )) && MAXF=$mhz
+  FSUM=$((FSUM + mhz))
   echo "PROGRESS $((i + 1)) $mhz $tc"
   i=$((i + 1)); sleep 1
 done
 
 kill "$PID" 2>/dev/null; kill -- -"$PID" 2>/dev/null; wait "$PID" 2>/dev/null
 [ "$MINF" = 999999 ] && MINF=0
+
+# average clock + average power (from the energy counter delta over the run)
+AVGF=$(( i > 0 ? FSUM / i : 0 ))
+E1=$( [ -n "$HW" ] && cat "$HW/energy1_input" 2>/dev/null || echo 0 )
+AVGP=$(awk -v a="$E0" -v b="$E1" -v n="$i" 'BEGIN{ if (n>0 && b>a) printf "%.0f", (b-a)/n/1000000; else print 0 }')
+# memory speed actually in effect (Mbps) — confirms the mem OC took
+MEMSPEED=$( [ -r "$OCM" ] && cat "$OCM" 2>/dev/null || echo 0 )
+# measured VRAM bandwidth via clpeak (OpenCL), if installed — directly reflects the
+# memory OC. Bandwidth is clpeak's FIRST section, so a short timeout captures it.
+MEMBW=""
+if command -v clpeak >/dev/null 2>&1; then
+  MEMBW=$(timeout 25 clpeak 2>/dev/null \
+          | awk '/Global memory bandwidth/{f=1;next} /^[[:space:]]*$/{f=0} f{print $NF}' \
+          | sort -g | tail -1)
+  MEMBW=$(printf '%.0f' "${MEMBW:-0}" 2>/dev/null); [ "$MEMBW" = 0 ] && MEMBW=""
+fi
 
 # benchmark score = average of the FPS figures the load tool reported (glmark2 /
 # vkmark print "FPS: N" per scene). Same tool + scenes each run, so it's a valid
@@ -213,6 +231,10 @@ echo "MAXFREQ=$MAXF"
 echo "HANG=$HANG"
 echo "CRASH=$CRASH"
 [ -n "$SCORE" ] && { echo "SCORE=$SCORE"; echo "SCOREUNIT=fps"; }
+echo "AVGFREQ=$AVGF"
+echo "AVGPOWER=$AVGP"
+[ "$MEMSPEED" != 0 ] && echo "MEMSPEED=$MEMSPEED"
+[ -n "$MEMBW" ] && echo "MEMBW=$MEMBW"
 case "$ST" in
   ok)        echo "stable: ${SECS}s load, peak ${MAXT}C, clocks ${MINF}-${MAXF} MHz, no hang"; exit 0 ;;
   throttled) echo "throttled: hit ${MAXT}C (limit ${TLIMIT}C) - stable but thermally capped";  exit 0 ;;

@@ -1760,17 +1760,19 @@ class VoltageCurveView(Gtk.Box):
 
     def _install_loader(self):
         # On Wayland (+apt) install the Wayland-native glmark2 build; the plain
-        # `glmark2` package is X11-only and won't run on a Wayland session.
+        # `glmark2` package is X11-only and won't run on a Wayland session. On apt
+        # also pull clpeak + the Intel OpenCL runtime so the test can report a
+        # measured VRAM-bandwidth number (reflects the memory overclock).
         apt = shutil.which("apt-get")
         pkg = ("glmark2-wayland" if os.environ.get("WAYLAND_DISPLAY") else "glmark2") if apt else "glmark2"
-        if   apt:                     cmd = ["pkexec", "apt-get", "install", "-y", pkg]
+        if   apt:                     cmd = ["pkexec", "apt-get", "install", "-y", pkg, "clpeak", "intel-opencl-icd"]
         elif shutil.which("dnf"):     cmd = ["pkexec", "dnf", "install", "-y", pkg]
         elif shutil.which("pacman"):  cmd = ["pkexec", "pacman", "-S", "--noconfirm", pkg]
         elif shutil.which("zypper"):  cmd = ["pkexec", "zypper", "--non-interactive", "install", pkg]
         else:
             self.window.toast("No supported package manager — install glmark2 manually", ms=4000)
             return
-        self._status_open(f"Installing {pkg}…")
+        self._status_open("Installing test + benchmark tools…" if apt else f"Installing {pkg}…")
 
         def work():
             try:
@@ -1877,33 +1879,43 @@ class VoltageCurveView(Gtk.Box):
         self.test_btn.set_sensitive(True); self.apply_btn.set_sensitive(True)
         st = s.get("STATUS", "error")
         mt, mnf, mxf = s.get("MAXTEMP", "?"), s.get("MINFREQ", "?"), s.get("MAXFREQ", "?")
-        # benchmark line: average FPS the load tool reported, compared to the last
-        # test of DIFFERENT settings. Persisted to disk so it survives restarts.
+        # ---- metrics block + persisted benchmark comparison ----
+        avgf, avgp = s.get("AVGFREQ"), s.get("AVGPOWER")
+        memsp, membw = s.get("MEMSPEED"), s.get("MEMBW")
+        def _num(x): return x if (x and str(x).isdigit()) else None
+        rows = [f"Duration:  {STRESS_SECS}s at full load", f"Peak temp:  {mt}°C"]
+        rows.append(f"Clocks:  {mnf}–{mxf} MHz" + (f"  (avg {avgf})" if _num(avgf) else ""))
+        if _num(avgp): rows.append(f"Power:  {avgp} W avg")
+        mem = f"{int(memsp)/1000:.1f} Gbps" if _num(memsp) else ""
+        if _num(membw): mem += (" · " if mem else "") + f"{membw} GB/s"
+        if mem: rows.append(f"Memory:  {mem}")
+        metrics = "\n".join(rows)
+
         bench = ""
         score = s.get("SCORE")
-        if st in ("ok", "throttled") and score and score.isdigit():
-            cur = int(score)
-            key = getattr(self, "_bench_curkey", "")
+        if st in ("ok", "throttled") and _num(score):
+            cur = int(score); key = getattr(self, "_bench_curkey", "")
             lbl = getattr(self, "_bench_label", "these settings")
             runs = self._bench_load()
             diff = [r for r in runs if r.get("key") != key and r.get("score")]
-            same = [r for r in runs if r.get("key") == key and r.get("score")]
+            arr = lambda d: "▲" if d > 0.5 else ("▼" if d < -0.5 else "≈")
+            pct = lambda a, b: (a - b) / b * 100.0 if b else 0.0
             if diff:
-                p = diff[-1]; base = p["score"]
-                d = (cur - base) / base * 100.0
-                arrow = "▲" if d > 0.5 else ("▼" if d < -0.5 else "≈")
-                bench = (f"\n\nBenchmark:  {cur} fps   {arrow} {d:+.1f}%\n"
-                         f"vs previous  ({p.get('label', '?')}: {base} fps)")
-            elif same:
-                p = same[-1]; base = p["score"]
-                d = (cur - base) / base * 100.0
-                bench = (f"\n\nBenchmark:  {cur} fps   "
-                         f"({d:+.1f}% vs your last run of these settings: {base} fps)")
+                p = diff[-1]; d = pct(cur, p["score"])
+                bench = (f"\n\nBenchmark  vs previous ({p.get('label', '?')})\n"
+                         f"  FPS:  {cur}  {arr(d)} {d:+.1f}%  (was {p['score']})")
+                if _num(membw) and p.get("membw"):
+                    db = pct(int(membw), p["membw"])
+                    bench += f"\n  VRAM BW:  {membw} GB/s  {arr(db)} {db:+.1f}%  (was {p['membw']})"
             else:
-                bench = f"\n\nBenchmark:  {cur} fps   (saved — change settings and test again to compare)"
-            runs.append({"ts": int(time.time()), "key": key, "label": lbl, "score": cur,
-                         "temp": mt, "minf": mnf, "maxf": mxf, "status": st})
-            self._bench_save(runs)
+                bench = ("\n\nBenchmark saved: " + f"{cur} fps"
+                         + (f" · {membw} GB/s VRAM" if _num(membw) else "")
+                         + "\nChange settings and test again to compare.")
+            rec = {"ts": int(time.time()), "key": key, "label": lbl, "score": cur,
+                   "temp": mt, "minf": mnf, "maxf": mxf, "status": st}
+            for k, v in (("avgfreq", avgf), ("avgpower", avgp), ("memspeed", memsp), ("membw", membw)):
+                if _num(v): rec[k] = int(v)
+            runs.append(rec); self._bench_save(runs)
         if st == "no_workload":
             self.window.toast("Install glmark2 or vkmark to run a stability test", ms=4000)
         elif st == "cancelled":
@@ -1924,19 +1936,14 @@ class VoltageCurveView(Gtk.Box):
         elif st == "throttled":
             self._result_dialog(
                 "Stable, but thermally throttled ⚠",
-                f"Ran the full load with no hang, but the GPU hit its temperature "
-                f"limit and lowered clocks to stay safe.\n\n"
-                f"Duration:  {STRESS_SECS}s at full load\n"
-                f"Peak temp:  {mt}°C  (limit {s.get('TEMPLIMIT', '?')}°C)\n"
-                f"Clocks:  {mnf}–{mxf} MHz" + bench)
+                "Ran the full load with no hang, but the GPU hit its temperature "
+                f"limit ({s.get('TEMPLIMIT', '?')}°C) and lowered clocks to stay safe."
+                "\n\n" + metrics + bench)
         else:
             self._result_dialog(
                 "Stability test passed ✓",
-                f"Ran the full load with no hang or crash — this overclock looks "
-                f"stable.\n\n"
-                f"Duration:  {STRESS_SECS}s at full load\n"
-                f"Peak temp:  {mt}°C\n"
-                f"Clocks:  {mnf}–{mxf} MHz" + bench)
+                "Ran the full load with no hang or crash — this overclock looks "
+                "stable.\n\n" + metrics + bench)
 
     def _result_dialog(self, heading, body):
         dlg = Adw.MessageDialog(transient_for=self.window, heading=heading, body=body)
