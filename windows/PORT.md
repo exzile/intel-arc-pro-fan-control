@@ -12,7 +12,7 @@ The alternatives considered and why IGCL won:
 
 | Approach | Verdict |
 |---|---|
-| **IGCL library** (chosen) | Native fan tables, VF-curve read/write, power/temp limits, and rich telemetry. No driver signing. Same path Intel's own Arc Control uses → most likely to also cover B70/G31. |
+| **IGCL library** (chosen) | Native fan tables, VF-curve read/write, power/temp limits, and rich telemetry. No driver signing. Same path Intel's own Arc Control uses → OC support (including on B70/G31) is auto-detected per card at runtime. |
 | Custom KMD driver mirroring the Linux mailbox pokes | Full control, but must be signed; duplicates what IGCL already exposes; highest brick risk. |
 | WinRing0-style MMIO shim from userspace | Fast to prototype but fights the vendor driver for the mailbox; signing/security caveats; fragile. |
 
@@ -50,10 +50,18 @@ The alternatives considered and why IGCL won:
 - **GPU clock tuning is offset-based** (IGCL exposes a frequency *offset*, not
   the min/max clamp the Linux `xe-gpu-tune --clk-min/--clk-max` used). Power and
   temperature limits map directly.
-- **The B70/G31 OC gap is real on Windows too — confirmed.** The G31 firmware
-  gates overclocking at the PCODE level regardless of OS, and Intel's own Windows
-  Arc Control app exposes **no tuning section** for the B70. Only the **B60/G21**
-  is overclockable here. Fan control works on both.
+- **B70/G31 OC is board/firmware-specific, and the gate is now capability-based,
+  not device-id-based.** On the tested **Intel-reference B70** (`8086:1701`),
+  the VF domain is unprovisioned and Intel's own Windows Arc Control app builds
+  no tuning section (`ctlOverclockGetProperties().bSupported == 0`) — that card
+  stays correctly gated. But an **ASRock Arc Pro B70 Creator** (subsystem
+  `1849:6020`) ships with the VF table provisioned, so it is expected to report
+  `bSupported == 1` and enable OC the same way the B60/G21 does — this rides the
+  same capability branch the B60 validates on hardware, but has not itself been
+  confirmed on ASRock hardware. The **B60/G21** overclocks unconditionally. Fan
+  control works on every card regardless of OC capability. See
+  [docs/B70-G31-MULTI-GPU.md](../docs/B70-G31-MULTI-GPU.md) for the board-policy
+  analysis and corroborating reports.
 
 ## OC ownership & the Intel service (Windows-specific)
 

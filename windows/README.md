@@ -12,8 +12,10 @@ boot **service** that re-applies your profile — built on Intel's own
 > driver already owns that mailbox, and Intel exposes the same capabilities as a
 > supported userspace API. IGCL gives us fan tables, VF-curve read/write, power
 > and temperature limits, and rich telemetry with **no kernel driver to sign** —
-> and it works through the same driver path the Windows Arc Control app uses, so
-> it should cover the B70/G31 too (which rejected the Linux PCODE OC path).
+> and it works through the same driver path the Windows Arc Control app uses.
+> OC support is auto-detected per card at runtime (IGCL `bSupported` +
+> VF-curve read), not blocked by device id: B60/G21 always works, and B70/G31
+> depends on the board — see the capability-gate note below.
 
 ## Status
 
@@ -134,6 +136,16 @@ Its log is `%ProgramData%\ArcFanControl\service.log`.
 
 ## Notes & caveats
 
+- **B70/G31 overclocking is board/firmware-specific, and now auto-detected.**
+  The OC gate is a runtime **capability check** (IGCL `bSupported` + a live
+  VF-curve read), not a device-id block. An **ASRock Arc Pro B70 Creator**
+  (subsystem `1849:6020`) is expected to enable OC automatically because its VF
+  table is provisioned — this rides the same capability branch the B60
+  validates, but has not been confirmed on ASRock hardware directly. An
+  **Intel-reference B70** (`8086:1701`) is firmware-locked (VF domain
+  unprovisioned, `0x5f/3` refused) and stays correctly gated — this is the
+  tested case. Fan control, power, and clock limits work on every B70
+  regardless. See [docs/B70-G31-MULTI-GPU.md](../docs/B70-G31-MULTI-GPU.md).
 - **Units differ from Linux.** The Linux CLI uses PWM `0-255`; IGCL fan tables
   use **percent (0-100)**, so this port speaks percent. `fan_curve.hpp` has a
   `pwmToPercent()` helper if you're porting an old curve.

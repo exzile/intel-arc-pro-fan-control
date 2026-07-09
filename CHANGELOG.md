@@ -2,6 +2,27 @@
 
 All notable changes to this project. Dates are ISO (UTC).
 
+## v1.1.2 - 2026-07-09
+
+### Fixed
+- **Windows OC gate is now capability-based, not device-id-based.**
+  `windows/src/gui/main.cpp` used to blanket-lock all B70/G31 cards out of
+  overclocking. It now checks IGCL `bSupported` + a live VF-curve read per
+  adapter, so an OC-capable B70 (e.g. an ASRock Arc Pro B70 Creator, subsystem
+  `1849:6020`) is no longer wrongly locked out, while firmware-locked cards
+  (Intel-reference B70, `8086:1701`) stay correctly gated. Linux (`xe_gt_oc`)
+  was already capability-based via `vf_curve` presence.
+
+### Docs
+- Corrected the B70/G31 overclocking story across README + docs: OC on B70 is
+  **board/firmware-specific** (ASRock provisioned vs. Intel-reference locked),
+  auto-detected at runtime rather than blocked by device id. Added the
+  board-policy analysis plus PCGamesHardware and issue #1 corroboration to
+  `docs/B70-G31-MULTI-GPU.md`, and reconciled `windows/README.md`,
+  `windows/PORT.md`, `windows/installer/README.md`, and `docs/NOTES.md` to
+  match. The ASRock-enable path itself has not been tested on ASRock hardware
+  in this repo — it rides the same capability branch the B60 validates.
+
 ## v1.1.1 - 2026-07-09
 
 ### Fixed

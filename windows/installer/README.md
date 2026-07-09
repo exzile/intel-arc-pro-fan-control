@@ -39,7 +39,12 @@ build artifact, produced by the command above, not committed.)
 
 ## Notes
 
-- **B70 overclocking is firmware-locked by Intel** — the installer still works,
-  but only the B60 accepts overclock writes. Fan control works on both.
+- **B70 overclocking is board/firmware-specific** — the installer still works
+  regardless. The B60 always accepts overclock writes. B70 support is
+  auto-detected per card at runtime: an Intel-reference B70 (`8086:1701`) is
+  firmware-locked and stays gated (tested), while an ASRock Arc Pro B70 Creator
+  (subsystem `1849:6020`) is expected to enable OC automatically since its VF
+  table is provisioned (not itself confirmed on ASRock hardware). Fan control
+  works on every card either way.
 - The app calls Intel's public IGCL (`ControlLib.dll`, a system driver DLL); no
   kernel driver is installed and nothing needs signing.
