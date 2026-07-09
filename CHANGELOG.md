@@ -2,6 +2,42 @@
 
 All notable changes to this project. Dates are ISO (UTC).
 
+## v1.1.1 - 2026-07-09
+
+### Fixed
+- **VF curve is 86 points, not 85.** `xe_gt_oc` now reads/writes the full
+  86-point voltage-frequency table (index `0x00..0x55`); the reader reports
+  exactly the points the firmware exposes and no longer fails the whole read on
+  a short/again-gated point. Confirmed against a live Windows-KMD DTrace (86
+  writes + 86 reads) and verified on Arc Pro B60 hardware (index `0x55` =
+  1035 mV). (#1, #2)
+- **`scripts/build-xe-module.sh` no longer reports a false build failure.** The
+  symbol-verify step used `nm ... | grep -q` under `set -o pipefail`; the
+  SIGPIPE produced a spurious "xe_gt_oc_init missing from module" even when the
+  symbol was present. Switched to `grep -c` (matching `xe-fan-rebuild.sh`).
+
+### Changed
+- Corrected `docs/B70-G31-MULTI-GPU.md`: the B70/G31 does **not** refuse every
+  `0x5d/0x5e/0x5f` opcode. The 3-step begin's `0x5f/4` is accepted; the wall is
+  specifically `0x5f/3`. Reads use `p2=0x13`, apply is `0x5e/8/0x73`, and the
+  table is 86 points.
+- Updated README / OVERCLOCKING / GUI docs and code comments from 85 to 86
+  points.
+- Reconciled the Windows installer version (`1.0.1` -> `1.1.1`).
+
+### Added
+- `oc/pcode_probe` debug sysfs (root, write-only): issue a single PCODE mailbox
+  transaction and log `ret/out0/out1`, for characterizing a card's OC surface.
+
+### Investigated (no functional change)
+- Hardware-verified issue #1's B70 custom-VF report: the `0x13` read domain,
+  `0x5e/8/0x73` apply, and 86-point table are all confirmed. Opening the B70
+  write session needs an unpublished "Pcode policy/waiver" before `0x5f/3`, and
+  it appears board/firmware specific: it works on the reporter's ASRock
+  (`1849:6020`) card, but an Intel-reference (`8086:1701`) B70 refuses the
+  verbatim sequence at `0x5f/3`, with its entire `0x5d` VF domain unprovisioned
+  from boot.
+
 ## v1.1.0 — 2026-07-09
 
 Benchmarking, cross-card support, and no-prompt authorization.

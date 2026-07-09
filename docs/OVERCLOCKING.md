@@ -8,7 +8,7 @@ exposes the VF curve, plus the `xe-gpu-oc` CLI on top of it.
 
 ## What it does
 
-The GPU holds an **85-point voltage-frequency curve** — each point is a frequency
+The GPU holds an **86-point voltage-frequency curve** — each point is a frequency
 step whose value is the voltage (mV). Lowering the curve undervolts (cooler / more
 efficient, or higher sustained clocks under a power cap); raising it gives headroom
 for higher clocks.
@@ -26,7 +26,7 @@ The `xe_gt_oc` patch adds a sysfs attribute:
 
 ### Why the stock driver lacks it
 
-Writing the curve is a PCODE *transaction* — a `begin` command, 85 point writes, an
+Writing the curve is a PCODE *transaction* — a `begin` command, 86 point writes, an
 `end` — and stock `xe` never issues the `begin`, so PCODE rejects the point writes
 outright. The vendor driver does issue it; this patch replicates that exact
 sequence (see the patch commit message and `docs/EVIDENCE.md` for how it was

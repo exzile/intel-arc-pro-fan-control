@@ -4,11 +4,11 @@
  *
  * Intel Arc Pro (Battlemage) voltage-frequency curve overclocking.
  *
- * The GPU exposes an 85-point voltage-frequency (VF) curve through the PCODE
+ * The GPU exposes an 86-point voltage-frequency (VF) curve through the PCODE
  * "late-binding" interface. Writing the curve is a bracketed transaction:
  *
  *   PCODE_MBOX(0x5f, 2, 0)            begin write session
- *   PCODE_MBOX(0x5d, 0xa, 3) d0=P    write point P = (mV << 8 | index), x85
+ *   PCODE_MBOX(0x5d, 0xa, 3) d0=P    write point P = (mV << 8 | index), x86
  *   PCODE_MBOX(0x5d, 0xb, 3)         end / finalize
  *
  * Reading a point: PCODE_MBOX(0x5d, 8, 3) with DATA0 = index -> DATA0 = point.
@@ -49,7 +49,7 @@
 #include "xe_pcode.h"
 #include "xe_pcode_api.h"
 
-#define OC_VF_NPTS	85
+#define OC_VF_NPTS	86	/* idx 0x00..0x55; confirmed by B60 KMD DTrace + issue #1 */
 #define OC_VF_TABLE	3
 #define OC_VMIN_MV	400
 #define OC_VMAX_MV	1200
@@ -111,8 +111,11 @@ static ssize_t vf_curve_show(struct kobject *kobj, struct kobj_attribute *attr,
 
 	for (i = 0; i < OC_VF_NPTS; i++) {
 		ret = oc_read_point(tile, i, &packed);
-		if (ret)
-			return ret;
+		if (ret) {
+			if (i == 0)		/* nothing readable: surface the error */
+				return ret;
+			break;			/* report the points the firmware exposes */
+		}
 		len += sysfs_emit_at(buf, len, "%d %u\n", i, packed >> 8);
 	}
 
@@ -127,22 +130,25 @@ static ssize_t vf_curve_store(struct kobject *kobj, struct kobj_attribute *attr,
 	u32 mv[OC_VF_NPTS];
 	u32 packed, end0 = 0, end1 = 0;
 	const char *p = buf;
-	int i, ret;
+	int i, ret, npts;
 
 	guard(xe_pm_runtime)(xe);
 
-	/* seed with the current curve so a partial write keeps unlisted points */
-	for (i = 0; i < OC_VF_NPTS; i++) {
-		ret = oc_read_point(tile, i, &packed);
+	/* seed with the current curve so a partial write keeps unlisted points;
+	 * stop at the last point the firmware actually exposes */
+	for (npts = 0; npts < OC_VF_NPTS; npts++) {
+		ret = oc_read_point(tile, npts, &packed);
 		if (ret)
-			return ret;
-		mv[i] = packed >> 8;
+			break;
+		mv[npts] = packed >> 8;
 	}
+	if (!npts)
+		return ret;
 
 	while (p && *p) {
 		unsigned int idx, volt;
 
-		if (sscanf(p, "%u %u", &idx, &volt) == 2 && idx < OC_VF_NPTS)
+		if (sscanf(p, "%u %u", &idx, &volt) == 2 && idx < npts)
 			mv[idx] = clamp_t(unsigned int, volt,
 					  OC_VMIN_MV, OC_VMAX_MV);
 		p = strchr(p, '\n');
@@ -155,7 +161,7 @@ static ssize_t vf_curve_store(struct kobject *kobj, struct kobj_attribute *attr,
 	if (ret)
 		return ret;
 
-	for (i = 0; i < OC_VF_NPTS; i++) {
+	for (i = 0; i < npts; i++) {
 		ret = xe_pcode_write64_timeout(tile, OC_MBOX_WRITE,
 					       (mv[i] << 8) | i, 0, 1);
 		if (ret)

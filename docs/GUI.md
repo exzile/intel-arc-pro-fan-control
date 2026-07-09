@@ -98,7 +98,7 @@ applies immediately.
   clocks). The graph previews the shifted curve live.
 - **Per-point curve** — tick *“Per-point curve (drag the nodes)”* and the graph grows draggable
   **anchor nodes**. Drag a node up/down to set the voltage for that frequency region independently
-  (e.g. undervolt hard at high clocks, leave idle alone). The full 85-point curve is written in one
+  (e.g. undervolt hard at high clocks, leave idle alone). The full 86-point curve is written in one
   transaction.
 
 Every knob is an **aligned slider + number box** (they stay in sync), with an icon and a live

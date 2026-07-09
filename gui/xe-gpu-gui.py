@@ -286,7 +286,7 @@ class XeGpu:
         return os.path.exists(self.oc_node())
 
     def read_vf_curve(self):
-        # 85 "<index> <voltage_mV>" lines -> list of mV by point index. [] if unavailable.
+        # 86 "<index> <voltage_mV>" lines -> list of mV by point index. [] if unavailable.
         raw = _read(self.oc_node())
         out = []
         for line in (raw or "").splitlines():
@@ -1161,7 +1161,7 @@ class VoltageCurveView(Gtk.Box):
         self.applied = 0           # uniform offset currently on the GPU
         self.applied_curve = None  # custom curve live on the GPU (list mV) or None
         self.mode = "offset"       # "offset" | "curve"
-        self.anchor_i = []         # anchor indices into the 85-point curve
+        self.anchor_i = []         # anchor indices into the 86-point curve
         self.anchor_off = []       # per-anchor offset (mV), curve mode
         self._tgt = []             # cached monotonic target curve (mV per point)
         self._drag = None

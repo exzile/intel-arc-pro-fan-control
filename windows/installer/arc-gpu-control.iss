@@ -5,7 +5,7 @@
 ; or directly: "ISCC.exe" arc-gpu-control.iss   (binaries must already be built)
 
 #define AppName    "Arc GPU Control"
-#define AppVersion "1.0.1"
+#define AppVersion "1.1.1"
 #define Publisher  "exzile"
 #define RepoURL    "https://github.com/exzile/intel-arc-pro-fan-control"
 

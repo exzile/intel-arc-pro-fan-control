@@ -116,6 +116,21 @@ capability word is the same, so this is a firmware-behaviour difference, not a c
 Most likely the shipped B70 GSC/PCODE firmware implements OC under a **different opcode set / unlock
 sequence** (or gates it differently on the workstation SKU).
 
+> **Update — hardware retest (2026-07, live B70 + B60 KMD DTrace).** The "every late-binding
+> opcode is refused" statement above is too broad and is corrected here:
+>
+> - The probe only ever issued the **single** `0x5f/2` begin. Retesting with the Windows-derived
+>   **3-step** begin (`0x5f/4 -> 0x5f/3 -> 0x5f/2`) on the B70 found **`0x5f/4` d0=1 is accepted**
+>   (`ret=0`); the wall is specifically **`0x5f/3` (`-71`)**. So it is a begin *unlock/ordering*
+>   gate, not a blanket refusal of the whole `0x5f` opcode.
+> - Independent DTrace of the **B60** Windows KMD OC-apply confirms issue #1's read/apply path: the
+>   VF read domain is **`0x5d/8/p2=0x13`** (not `p2=3`), apply/status is **`0x5e/8/0x73`**, and the
+>   table is **86 points** (`0x00..0x55`), not 85.
+> - A cold `0x5d/8/0x13` read on the B70 still returns `-71`; it needs the begin session opened
+>   first, which is gated at `0x5f/3` behind the unshared "Pcode policy/waiver" issue #1 references.
+>
+> Net: the B70 OC path is gated at the begin unlock, not categorically absent.
+
 ### Reverse-engineering status / roadmap
 This is the same wall we started at for the B60, and the same tool breaks it:
 

@@ -63,11 +63,11 @@ index 0000000..3d9dbe8
 + *
 + * Intel Arc Pro (Battlemage) voltage-frequency curve overclocking.
 + *
-+ * The GPU exposes an 85-point voltage-frequency (VF) curve through the PCODE
++ * The GPU exposes an 86-point voltage-frequency (VF) curve through the PCODE
 + * "late-binding" interface. Writing the curve is a bracketed transaction:
 + *
 + *   PCODE_MBOX(0x5f, 2, 0)            begin write session
-+ *   PCODE_MBOX(0x5d, 0xa, 3) d0=P    write point P = (mV << 8 | index), x85
++ *   PCODE_MBOX(0x5d, 0xa, 3) d0=P    write point P = (mV << 8 | index), x86
 + *   PCODE_MBOX(0x5d, 0xb, 3)         end / finalize
 + *
 + * Reading a point: PCODE_MBOX(0x5d, 8, 3) with DATA0 = index -> DATA0 = point.

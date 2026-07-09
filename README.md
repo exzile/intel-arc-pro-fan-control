@@ -8,7 +8,7 @@ Everything is driven from a native **GTK4 desktop app** (`xe-gpu-gui`) *and* scr
 
 > **Overclocking now works too.** The VF (voltage-frequency) curve — the one control Windows has
 > and stock `xe` lacks — is unlocked by a small `xe_gt_oc` patch that issues the PCODE *begin →
-> write → end* transaction the stock driver omits. Read/undervolt/overvolt the 85-point curve from
+> write → end* transaction the stock driver omits. Read/undervolt/overvolt the 86-point curve from
 > sysfs. It was never a fused-off Pro-SKU lock — just a missing driver transaction. See
 > **[docs/OVERCLOCKING.md](docs/OVERCLOCKING.md)**.
 
@@ -98,7 +98,7 @@ rule** so those helpers run **without a password prompt** for a locally logged-i
   no patch, no PCODE poking, safe.
 - **Overclocking (VF curve)** is a separate, self-contained `xe_gt_oc` patch (`kernel/` +
   `scripts/apply_xeoc.sh`) that adds `.../gt0/oc/vf_curve`. Writing the curve is a PCODE
-  transaction (`begin` `0x5f/2` → 85× point write `0x5d/0xa` → `end` `0x5d/0xb`); the stock
+  transaction (`begin` `0x5f/2` → 86× point write `0x5d/0xa` → `end` `0x5d/0xb`); the stock
   driver omits the `begin`, so the writes are rejected. Details + how it was derived:
   [docs/OVERCLOCKING.md](docs/OVERCLOCKING.md).
 
@@ -161,7 +161,7 @@ sudo xe-gpu-tune set --power-w 150 --clk-max 2000 --clk-min 400
 sudo xe-gpu-tune reset
 
 # overclocking — voltage/memory/temp (needs the xe_gt_oc patch, see docs/OVERCLOCKING.md)
-sudo xe-gpu-oc read             # dump the 85-point curve + memory speed + temp limit
+sudo xe-gpu-oc read             # dump the 86-point curve + memory speed + temp limit
 sudo xe-gpu-oc offset -25       # undervolt every point 25 mV (cooler / more efficient)
 sudo xe-gpu-oc offset 25 1050   # overvolt +25 mV, capped at a 1050 mV ceiling
 sudo xe-gpu-oc curve 0:820 10:880 ...   # write a full/partial custom curve (one transaction)

@@ -56,7 +56,7 @@ The VF-curve write is a **bracketed transaction** the vendor driver sends and st
 
 ```
 PCODE_MBOX(0x5f, 2, 0)              begin write session      <-- THE MISSING PIECE
-PCODE_MBOX(0x5d, 0xa, 3) DATA0=P    write point P = (mV<<8 | index), x85
+PCODE_MBOX(0x5d, 0xa, 3) DATA0=P    write point P = (mV<<8 | index), x85  [corrected v1.1.1: 86 points, idx 0x00..0x55]
 PCODE_MBOX(0x5d, 0xb, 3)            end / finalize
 ```
 
