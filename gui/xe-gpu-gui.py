@@ -5,7 +5,7 @@
 # xe_gt_oc patch exposes .../gt0/oc/vf_curve).
 # Controls call xe-fan-curve / xe-gpu-tune / xe-gpu-oc via pkexec (polkit prompts
 # for writes). Reads are unprivileged sysfs; no kernel poking here.
-import os, glob, subprocess, threading, collections, json, math, re, shutil
+import os, glob, subprocess, threading, collections, json, math, re, shutil, time, hashlib
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -1819,7 +1819,9 @@ class VoltageCurveView(Gtk.Box):
         self.test_btn.set_sensitive(False); self.apply_btn.set_sensitive(False)
         self.hint.set_text("stability test starting…")
         self.window.toast(f"Stability test: current settings, {STRESS_SECS}s load (fan → max)…")
-        self._bench_label = self._settings_label()   # snapshot for the benchmark comparison
+        # snapshot the settings identity for the (persisted) benchmark comparison
+        self._bench_label = self._settings_label()
+        self._bench_curkey = self._bench_keyval()
         # run via pkexec with --fan-guard: root ramps the fan to max + restores it, and
         # runs the workload as us (passing our session env so it can open the display).
         env = os.environ
@@ -1875,20 +1877,33 @@ class VoltageCurveView(Gtk.Box):
         self.test_btn.set_sensitive(True); self.apply_btn.set_sensitive(True)
         st = s.get("STATUS", "error")
         mt, mnf, mxf = s.get("MAXTEMP", "?"), s.get("MINFREQ", "?"), s.get("MAXFREQ", "?")
-        # benchmark line: average FPS the load tool reported, vs the previous test
+        # benchmark line: average FPS the load tool reported, compared to the last
+        # test of DIFFERENT settings. Persisted to disk so it survives restarts.
         bench = ""
         score = s.get("SCORE")
         if st in ("ok", "throttled") and score and score.isdigit():
-            cur = int(score); prev = getattr(self, "_last_bench", None)
+            cur = int(score)
+            key = getattr(self, "_bench_curkey", "")
             lbl = getattr(self, "_bench_label", "these settings")
-            if prev and prev.get("score"):
-                d = (cur - prev["score"]) / prev["score"] * 100.0
+            runs = self._bench_load()
+            diff = [r for r in runs if r.get("key") != key and r.get("score")]
+            same = [r for r in runs if r.get("key") == key and r.get("score")]
+            if diff:
+                p = diff[-1]; base = p["score"]
+                d = (cur - base) / base * 100.0
                 arrow = "▲" if d > 0.5 else ("▼" if d < -0.5 else "≈")
                 bench = (f"\n\nBenchmark:  {cur} fps   {arrow} {d:+.1f}%\n"
-                         f"vs previous  ({prev['label']}: {prev['score']} fps)")
+                         f"vs previous  ({p.get('label', '?')}: {base} fps)")
+            elif same:
+                p = same[-1]; base = p["score"]
+                d = (cur - base) / base * 100.0
+                bench = (f"\n\nBenchmark:  {cur} fps   "
+                         f"({d:+.1f}% vs your last run of these settings: {base} fps)")
             else:
-                bench = f"\n\nBenchmark:  {cur} fps   (baseline — test again after a change to compare)"
-            self._last_bench = {"score": cur, "label": lbl}
+                bench = f"\n\nBenchmark:  {cur} fps   (saved — change settings and test again to compare)"
+            runs.append({"ts": int(time.time()), "key": key, "label": lbl, "score": cur,
+                         "temp": mt, "minf": mnf, "maxf": mxf, "status": st})
+            self._bench_save(runs)
         if st == "no_workload":
             self.window.toast("Install glmark2 or vkmark to run a stability test", ms=4000)
         elif st == "cancelled":
@@ -1929,14 +1944,44 @@ class VoltageCurveView(Gtk.Box):
         dlg.set_default_response("ok"); dlg.set_close_response("ok")
         dlg.present()
 
+    BENCH_PATH = os.path.expanduser("~/.config/xe-gpu-arc/benchmarks.json")
+
     def _settings_label(self):
-        # short label of the overclock under test, for the benchmark comparison
+        # short human label of the overclock under test
         if not getattr(self, "stock", None):
             return "stock"
-        if self.mode == "offset":
-            o = int(self.f_off.value)
-            return f"{o:+d} mV" if o else "stock"
-        return "custom curve"
+        v = (f"{int(self.f_off.value):+d}mV" if int(self.f_off.value) else "stock V") \
+            if self.mode == "offset" else "custom curve"
+        if self.f_mem is not None:
+            v += f" · {self.f_mem.value:.1f}Gbps"
+        return v
+
+    def _bench_keyval(self):
+        # stable signature of the settings under test (curve + mem + temp)
+        if not getattr(self, "stock", None):
+            return "stock"
+        parts = [",".join(str(v) for v in self._target_curve())]
+        if self.f_mem is not None:  parts.append("m%d" % int(self.f_mem.value * 1000))
+        if self.f_temp is not None: parts.append("t%d" % int(self.f_temp.value))
+        return hashlib.sha1("|".join(parts).encode()).hexdigest()[:12]
+
+    def _bench_load(self):
+        try:
+            with open(self.BENCH_PATH) as f:
+                d = json.load(f)
+            return d.get("runs", []) if isinstance(d, dict) else []
+        except Exception:
+            return []
+
+    def _bench_save(self, runs):
+        try:
+            os.makedirs(os.path.dirname(self.BENCH_PATH), exist_ok=True)
+            tmp = self.BENCH_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"runs": runs[-200:]}, f, indent=1)
+            os.replace(tmp, self.BENCH_PATH)
+        except Exception:
+            pass
         if s.get("NOTE") and st in ("ok", "throttled"):
             self.window.toast(s["NOTE"], ms=5500)
         self._hint()
