@@ -737,7 +737,6 @@ void loadOcFields() {
     std::string err;
     const AdapterInfo* d = g_arc.current();
     const std::string key = d ? d->key() : std::string();
-    g_ocGated = (key == "e223");     // B70/G31 firmware rejects the voltage/mem/temp OC ops
     AppConfig cfg; loadConfigFor(key, cfg, err);
     OcState s; const bool live = g_arc.ocGetState(s, err);
     auto val = [&](bool cHas, double cV, bool lHas, double lV, double dflt) {
@@ -752,6 +751,14 @@ void loadOcFields() {
 
     g_vfStock.clear();
     std::string e2; g_arc.readVFCurve(g_vfStock, false, e2);   // stock curve (empty on gated cards)
+
+    // Runtime capability gate (NOT a device-id check): some B70 boards (e.g. ASRock,
+    // subsystem 1849:6020) ship with the firmware waiver preset and fully support OC,
+    // while our Intel-reference B70 (1701) firmware-locks voltage/mem/temp. Gate on what
+    // ctlOverclockGetProperties + the per-knob getters + the VF-curve read actually report
+    // for THIS card, so a card that truly supports OC is never locked out by its device id.
+    g_ocGated = !(live && s.supported && (s.hasGpuVoltOffset || s.hasMemSpeed || s.hasTempLimit))
+                || g_vfStock.size() < 2;
 
     for (int i = 0; i < kOcCount; ++i)
         ::EnableWindow(g_oc[i].tb, (!g_ocGated || !g_oc[i].b70Gated) ? TRUE : FALSE);
