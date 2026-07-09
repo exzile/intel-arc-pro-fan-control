@@ -1,0 +1,33 @@
+// 49-xe-gpu.rules — let the Arc (xe) GPU-control helpers run without a password.
+//
+// The GUI drives privileged actions (apply overclock, run the fan-guarded stress
+// test, restore stock) via `pkexec <helper>`, which by default prompts for a
+// password EVERY time. This rule authorizes ONLY the specific helper binaries
+// below, and ONLY for a user who is physically logged in (local + active session)
+// and in the admin group (sudo/wheel). It does NOT grant general root — package
+// installs (apt/dnf/…) and every other pkexec action still prompt as normal.
+//
+// An SSH/remote session is deliberately NOT covered (subject.active is false there),
+// so this only ever applies at the actual desktop. Installed by install.sh to
+// /etc/polkit-1/rules.d/. Delete that file to revert to per-action prompting.
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.policykit.exec")
+        return;
+    var prog = action.lookup("program") || "";
+    var allowed = [
+        "/usr/local/bin/xe-gpu-oc",
+        "/usr/local/bin/xe-gpu-stress",
+        "/usr/local/bin/xe-fan-curve",
+        "/usr/local/bin/xe-gpu-tune",
+        "/usr/local/bin/xe-gpu",
+        "/usr/local/bin/xe-gpu-temps",
+        "/usr/local/bin/xe-gpu-vramd",
+        "/usr/local/sbin/xe-fan-rebuild"
+    ];
+    if (allowed.indexOf(prog) === -1)
+        return;
+    if (subject.local && subject.active &&
+        (subject.isInGroup("sudo") || subject.isInGroup("wheel"))) {
+        return polkit.Result.YES;
+    }
+});

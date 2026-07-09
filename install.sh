@@ -34,6 +34,17 @@ if [ -f gui/xe-gpu-gui.py ]; then
   echo "  installed $BIN/xe-gpu-gui"
 fi
 
+# polkit rule: let the GPU-control helpers run without a password prompt every time
+# (scoped to those exact binaries + a local, active admin session — see the file
+# header). Only where polkit's JS rules dir exists (polkit >= 0.106).
+if [ -f polkit/49-xe-gpu.rules ] && [ -d /etc/polkit-1/rules.d ]; then
+  install -m644 polkit/49-xe-gpu.rules /etc/polkit-1/rules.d/49-xe-gpu.rules
+  systemctl try-restart polkit.service 2>/dev/null || systemctl try-restart polkitd.service 2>/dev/null || true
+  echo "  installed /etc/polkit-1/rules.d/49-xe-gpu.rules (no more per-action password prompts)"
+elif [ -f polkit/49-xe-gpu.rules ]; then
+  echo "  skipped polkit rule: /etc/polkit-1/rules.d not present (older polkit) — helpers will still prompt"
+fi
+
 # desktop entry for the invoking (non-root) user, so it shows in the apps menu
 USER_HOME=$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)
 if [ -f gui/xe-gpu-gui.desktop ] && [ -n "$USER_HOME" ]; then
