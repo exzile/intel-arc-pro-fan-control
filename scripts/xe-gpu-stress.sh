@@ -194,6 +194,17 @@ if command -v clpeak >/dev/null 2>&1; then
   COMPUTE=$(printf '%.0f' "${COMPUTE:-0}" 2>/dev/null); [ "$COMPUTE" = 0 ] && COMPUTE=""
 fi
 
+# real LLM throughput on the GPU via OpenVINO GenAI, if set up (see
+# scripts/setup-llm-benchmark.sh): prefill (compute-bound) + decode (memory-
+# bandwidth-bound) tok/s, measured with the OC still applied.
+LLMPRE=""; LLMDEC=""
+LLMH="/home/${RUNUSER:-joey}/ovbench"
+if [ -x "$LLMH/bin/python" ] && [ -f "$LLMH/llmbench.py" ] && [ -d "$LLMH/model" ]; then
+  LO=$(timeout 90 "$LLMH/bin/python" "$LLMH/llmbench.py" "$LLMH/model" GPU 2>/dev/null)
+  LLMPRE=$(printf '%s\n' "$LO" | awk -F= '/^PREFILL=/{printf "%.0f",$2; exit}')
+  LLMDEC=$(printf '%s\n' "$LO" | awk -F= '/^DECODE=/{printf "%.0f",$2; exit}')
+fi
+
 # benchmark score = average of the FPS figures the load tool reported (glmark2 /
 # vkmark print "FPS: N" per scene). Same tool + scenes each run, so it's a valid
 # apples-to-apples number to compare across settings. glxgears prints none -> empty.
@@ -237,6 +248,8 @@ echo "AVGPOWER=$AVGP"
 [ "$MEMSPEED" != 0 ] && echo "MEMSPEED=$MEMSPEED"
 [ -n "$MEMBW" ] && echo "MEMBW=$MEMBW"
 [ -n "$COMPUTE" ] && echo "COMPUTE=$COMPUTE"
+[ -n "$LLMPRE" ] && echo "LLMPREFILL=$LLMPRE"
+[ -n "$LLMDEC" ] && echo "LLMDECODE=$LLMDEC"
 case "$ST" in
   ok)        echo "stable: ${SECS}s load, peak ${MAXT}C, clocks ${MINF}-${MAXF} MHz, no hang"; exit 0 ;;
   throttled) echo "throttled: hit ${MAXT}C (limit ${TLIMIT}C) - stable but thermally capped";  exit 0 ;;

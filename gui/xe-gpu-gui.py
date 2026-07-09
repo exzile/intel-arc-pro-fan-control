@@ -1882,6 +1882,7 @@ class VoltageCurveView(Gtk.Box):
         # ---- metrics block + persisted benchmark comparison ----
         avgf, avgp = s.get("AVGFREQ"), s.get("AVGPOWER")
         memsp, membw, comp = s.get("MEMSPEED"), s.get("MEMBW"), s.get("COMPUTE")
+        llmpre, llmdec = s.get("LLMPREFILL"), s.get("LLMDECODE")
         def _num(x): return x if (x and str(x).isdigit()) else None
         rows = [f"Duration:  {STRESS_SECS}s at full load", f"Peak temp:  {mt}°C"]
         rows.append(f"Clocks:  {mnf}–{mxf} MHz" + (f"  (avg {avgf})" if _num(avgf) else ""))
@@ -1890,8 +1891,10 @@ class VoltageCurveView(Gtk.Box):
         if _num(membw): mem += (" · " if mem else "") + f"{membw} GB/s"
         if mem: rows.append(f"Memory:  {mem}")
         if _num(comp): rows.append(f"Compute:  {int(comp)/1000:.1f} TFLOPS")
-        # LLM framing: decode throughput scales with VRAM bandwidth, prefill with compute
-        if _num(membw) or _num(comp):
+        if _num(llmdec):
+            rows.append(f"LLM (1.5B):  {llmpre or '?'} tok/s prefill · {llmdec} tok/s decode")
+        elif _num(membw) or _num(comp):
+            # proxy framing when the real LLM benchmark isn't set up
             llm = "LLM:  " + ("decode ∝ %s GB/s" % membw if _num(membw) else "")
             if _num(comp): llm += ("   " if _num(membw) else "") + f"prefill ∝ {int(comp)/1000:.1f} TFLOPS"
             rows.append(llm)
@@ -1913,6 +1916,9 @@ class VoltageCurveView(Gtk.Box):
                 if _num(membw) and p.get("membw"):
                     db = pct(int(membw), p["membw"])
                     bench += f"\n  VRAM BW:  {membw} GB/s  {arr(db)} {db:+.1f}%  (was {p['membw']})"
+                if _num(llmdec) and p.get("llmdec"):
+                    dl = pct(int(llmdec), p["llmdec"])
+                    bench += f"\n  LLM decode:  {llmdec} tok/s  {arr(dl)} {dl:+.1f}%  (was {p['llmdec']})"
             else:
                 bench = ("\n\nBenchmark saved: " + f"{cur} fps"
                          + (f" · {membw} GB/s VRAM" if _num(membw) else "")
@@ -1920,7 +1926,7 @@ class VoltageCurveView(Gtk.Box):
             rec = {"ts": int(time.time()), "key": key, "label": lbl, "score": cur,
                    "temp": mt, "minf": mnf, "maxf": mxf, "status": st}
             for k, v in (("avgfreq", avgf), ("avgpower", avgp), ("memspeed", memsp),
-                         ("membw", membw), ("compute", comp)):
+                         ("membw", membw), ("compute", comp), ("llmpre", llmpre), ("llmdec", llmdec)):
                 if _num(v): rec[k] = int(v)
             runs.append(rec); self._bench_save(runs)
         if st == "no_workload":
