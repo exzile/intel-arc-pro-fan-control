@@ -185,12 +185,13 @@ AVGP=$(awk -v a="$E0" -v b="$E1" -v n="$i" 'BEGIN{ if (n>0 && b>a) printf "%.0f"
 MEMSPEED=$( [ -r "$OCM" ] && cat "$OCM" 2>/dev/null || echo 0 )
 # measured VRAM bandwidth via clpeak (OpenCL), if installed — directly reflects the
 # memory OC. Bandwidth is clpeak's FIRST section, so a short timeout captures it.
-MEMBW=""
+MEMBW=""; COMPUTE=""
 if command -v clpeak >/dev/null 2>&1; then
-  MEMBW=$(timeout 25 clpeak 2>/dev/null \
-          | awk '/Global memory bandwidth/{f=1;next} /^[[:space:]]*$/{f=0} f{print $NF}' \
-          | sort -g | tail -1)
-  MEMBW=$(printf '%.0f' "${MEMBW:-0}" 2>/dev/null); [ "$MEMBW" = 0 ] && MEMBW=""
+  CLP=$(timeout 40 clpeak 2>/dev/null)    # bandwidth (LLM decode) + compute (LLM prefill)
+  MEMBW=$(printf '%s\n' "$CLP"   | awk '/Global memory bandwidth/{f=1;next} /^[[:space:]]*$/{f=0} f{print $NF}' | sort -g | tail -1)
+  COMPUTE=$(printf '%s\n' "$CLP" | awk '/Single-precision compute/{f=1;next}  /^[[:space:]]*$/{f=0} f{print $NF}' | sort -g | tail -1)
+  MEMBW=$(printf '%.0f' "${MEMBW:-0}" 2>/dev/null);     [ "$MEMBW" = 0 ] && MEMBW=""
+  COMPUTE=$(printf '%.0f' "${COMPUTE:-0}" 2>/dev/null); [ "$COMPUTE" = 0 ] && COMPUTE=""
 fi
 
 # benchmark score = average of the FPS figures the load tool reported (glmark2 /
@@ -235,6 +236,7 @@ echo "AVGFREQ=$AVGF"
 echo "AVGPOWER=$AVGP"
 [ "$MEMSPEED" != 0 ] && echo "MEMSPEED=$MEMSPEED"
 [ -n "$MEMBW" ] && echo "MEMBW=$MEMBW"
+[ -n "$COMPUTE" ] && echo "COMPUTE=$COMPUTE"
 case "$ST" in
   ok)        echo "stable: ${SECS}s load, peak ${MAXT}C, clocks ${MINF}-${MAXF} MHz, no hang"; exit 0 ;;
   throttled) echo "throttled: hit ${MAXT}C (limit ${TLIMIT}C) - stable but thermally capped";  exit 0 ;;

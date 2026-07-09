@@ -1881,7 +1881,7 @@ class VoltageCurveView(Gtk.Box):
         mt, mnf, mxf = s.get("MAXTEMP", "?"), s.get("MINFREQ", "?"), s.get("MAXFREQ", "?")
         # ---- metrics block + persisted benchmark comparison ----
         avgf, avgp = s.get("AVGFREQ"), s.get("AVGPOWER")
-        memsp, membw = s.get("MEMSPEED"), s.get("MEMBW")
+        memsp, membw, comp = s.get("MEMSPEED"), s.get("MEMBW"), s.get("COMPUTE")
         def _num(x): return x if (x and str(x).isdigit()) else None
         rows = [f"Duration:  {STRESS_SECS}s at full load", f"Peak temp:  {mt}°C"]
         rows.append(f"Clocks:  {mnf}–{mxf} MHz" + (f"  (avg {avgf})" if _num(avgf) else ""))
@@ -1889,6 +1889,12 @@ class VoltageCurveView(Gtk.Box):
         mem = f"{int(memsp)/1000:.1f} Gbps" if _num(memsp) else ""
         if _num(membw): mem += (" · " if mem else "") + f"{membw} GB/s"
         if mem: rows.append(f"Memory:  {mem}")
+        if _num(comp): rows.append(f"Compute:  {int(comp)/1000:.1f} TFLOPS")
+        # LLM framing: decode throughput scales with VRAM bandwidth, prefill with compute
+        if _num(membw) or _num(comp):
+            llm = "LLM:  " + ("decode ∝ %s GB/s" % membw if _num(membw) else "")
+            if _num(comp): llm += ("   " if _num(membw) else "") + f"prefill ∝ {int(comp)/1000:.1f} TFLOPS"
+            rows.append(llm)
         metrics = "\n".join(rows)
 
         bench = ""
@@ -1913,7 +1919,8 @@ class VoltageCurveView(Gtk.Box):
                          + "\nChange settings and test again to compare.")
             rec = {"ts": int(time.time()), "key": key, "label": lbl, "score": cur,
                    "temp": mt, "minf": mnf, "maxf": mxf, "status": st}
-            for k, v in (("avgfreq", avgf), ("avgpower", avgp), ("memspeed", memsp), ("membw", membw)):
+            for k, v in (("avgfreq", avgf), ("avgpower", avgp), ("memspeed", memsp),
+                         ("membw", membw), ("compute", comp)):
                 if _num(v): rec[k] = int(v)
             runs.append(rec); self._bench_save(runs)
         if st == "no_workload":
