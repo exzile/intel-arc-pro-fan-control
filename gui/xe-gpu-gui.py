@@ -2027,6 +2027,10 @@ class VoltageCurveView(Gtk.Box):
                 "Stability test passed ✓",
                 "Ran the full load with no hang or crash — this overclock looks "
                 "stable.\n\n" + metrics + bench)
+        if s.get("NOTE") and st in ("ok", "throttled"):
+            self.window.toast(s["NOTE"], ms=5500)
+        self._hint()
+        return False
 
     def _result_dialog(self, heading, body):
         dlg = Adw.MessageDialog(transient_for=self.window, heading=heading, body=body)
@@ -2072,10 +2076,6 @@ class VoltageCurveView(Gtk.Box):
             os.replace(tmp, self.BENCH_PATH)
         except Exception:
             pass
-        if s.get("NOTE") and st in ("ok", "throttled"):
-            self.window.toast(s["NOTE"], ms=5500)
-        self._hint()
-        return False
 
     # ---- geometry ----
     def _geo(self):
