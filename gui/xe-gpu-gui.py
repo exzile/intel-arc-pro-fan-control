@@ -1883,6 +1883,7 @@ class VoltageCurveView(Gtk.Box):
         # snapshot the settings identity for the (persisted) benchmark comparison
         self._bench_label = self._settings_label()
         self._bench_curkey = self._bench_keyval()
+        self._status_open(f"Stability test — {STRESS_SECS}s GPU load…")
         # run via pkexec with --fan-guard: root ramps the fan to max + restores it, and
         # runs the workload as us (passing our session env so it can open the display).
         env = os.environ
@@ -1921,6 +1922,8 @@ class VoltageCurveView(Gtk.Box):
                     f = line.split()
                     if len(f) == 4:
                         GLib.idle_add(self._stress_progress, f[1], f[2], f[3])
+                elif line.startswith("PHASE "):
+                    GLib.idle_add(self._stress_phase, line[6:])
                 elif "=" in line:
                     k, v = line.split("=", 1); summary[k] = v
             p.wait()
@@ -1931,7 +1934,13 @@ class VoltageCurveView(Gtk.Box):
 
     def _stress_progress(self, sec, mhz, tc):
         self.hint.set_text(f"testing… {sec}s / {STRESS_SECS}s · {mhz} MHz · {tc}°C")
-        self._status_set(f"Testing… {sec}s / {STRESS_SECS}s\n{mhz} MHz · {tc}°C")
+        self._status_set(f"Load test… {sec}s / {STRESS_SECS}s\n{mhz} MHz · {tc}°C")
+        return False
+
+    def _stress_phase(self, name):
+        msg = {"clpeak": "Benchmarking VRAM bandwidth + compute…\n(this part takes ~40s)",
+               "llm":    "Benchmarking LLM tokens/sec…"}.get(name.strip(), name.strip())
+        self._status_set(msg); self.hint.set_text(msg.split(chr(10))[0])
         return False
 
     def _stress_done(self, s):
